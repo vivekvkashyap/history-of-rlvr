@@ -84,12 +84,15 @@ class GRPOTrainer(Trainer):
         model: nn.Module,
         args: GRPOConfig,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
+        log_router=None,
         **kwargs,
     ):
         # Suppress "estimate_tokens" warning from Trainer
         warnings_issued = getattr(model, "warnings_issued", None)
         if isinstance(warnings_issued, dict):
             warnings_issued["estimate_tokens"] = True
+
+        self.log_router = log_router
 
         # ── LoRA: wrap model with PEFT *before* Trainer.__init__ ───────
         # This ensures the Trainer creates the optimizer over only the
@@ -148,6 +151,13 @@ class GRPOTrainer(Trainer):
 
         # ── Rollout buffer for wandb completions table ────────────────
         self._grpo_rollouts: Optional[Dict[str, Any]] = None
+
+        # ── Remove noisy HF Trainer callbacks when log_router is active ─
+        # (output goes to log files, not stdout)
+        if self.log_router:
+            from transformers.trainer_callback import PrinterCallback, ProgressCallback
+            self.remove_callback(PrinterCallback)
+            self.remove_callback(ProgressCallback)
 
     # ================================================================
     #  Prevent DataParallel (GPU 1 is reserved for vLLM)
@@ -218,11 +228,31 @@ class GRPOTrainer(Trainer):
         B = len(prompts)
 
         # ── 3. Generate completions (+ inference logprobs from vLLM) ──
+        if self.log_router:
+            self.log_router.log_inference(
+                f"Generating [bold]{B}[/bold]x[bold]{G}[/bold] completions "
+                f"for step [bold]{self.state.global_step}[/bold]..."
+            )
         t0 = time.time()
         completions, completion_token_ids, completion_logprobs = (
             self.inference_engine.generate(prompts)
         )
         t_gen = time.time() - t0
+
+        # ── Post-generation stats ───────────────────────────────────────
+        comp_lengths = [len(ids) for ids in completion_token_ids]
+        avg_comp_len = sum(comp_lengths) / len(comp_lengths)
+        max_comp_len = float(max(comp_lengths))
+        total_tokens = sum(comp_lengths)
+        tok_per_s = total_tokens / t_gen if t_gen > 0 else 0.0
+
+        if self.log_router:
+            self.log_router.log_inference(
+                f"Generated [bold]{B * G}[/bold] completions in "
+                f"[yellow]{t_gen:.1f}s[/yellow]  "
+                f"([dim]{tok_per_s:.0f} tok/s, avg {avg_comp_len:.0f} tok, "
+                f"max {max_comp_len:.0f} tok[/dim])"
+            )
 
         # ── 4. Compute rewards ─────────────────────────────────────────
         expanded_gts = [gt for gt in ground_truths for _ in range(G)]
@@ -273,9 +303,8 @@ class GRPOTrainer(Trainer):
         stats["rewards/advantage_mean"] = advantages.mean().item()
 
         # Training / generation metrics
-        comp_lengths = [len(ids) for ids in completion_token_ids]
-        stats["train/completion_len_mean"] = sum(comp_lengths) / len(comp_lengths)
-        stats["train/completion_len_max"] = float(max(comp_lengths))
+        stats["train/completion_len_mean"] = avg_comp_len
+        stats["train/completion_len_max"] = max_comp_len
         stats["train/masked_fraction"] = 1.0 - (
             loss_mask_shifted.sum() / loss_mask_shifted.numel()
         ).item()
@@ -293,15 +322,27 @@ class GRPOTrainer(Trainer):
             "rewards": rewards,
         }
 
-        # ── Console summary ───────────────────────────────────────────
-        logger.info(
-            f"step {self.state.global_step} | "
-            f"loss={loss.item():.4f} | "
-            f"reward={stats['rewards/mean']:.3f} | "
-            f"kl={stats['loss/kl']:.4f} | "
-            f"gen={t_gen:.1f}s | train={t_train:.1f}s | "
-            f"comp_len={stats['train/completion_len_mean']:.0f}"
-        )
+        # ── Log router: trainer update ─────────────────────────────────
+        if self.log_router:
+            self.log_router.log_trainer(
+                f"step [bold]{self.state.global_step}[/bold] | "
+                f"loss=[red]{loss.item():.4f}[/red] | "
+                f"reward=[yellow]{stats['rewards/mean']:.3f}[/yellow] | "
+                f"kl={stats['loss/kl']:.4f} | "
+                f"gen={t_gen:.1f}s train={t_train:.1f}s | "
+                f"comp_len={avg_comp_len:.0f}"
+            )
+
+        # ── Console summary (fallback when no log_router) ─────────────
+        if not self.log_router:
+            logger.info(
+                f"step {self.state.global_step} | "
+                f"loss={loss.item():.4f} | "
+                f"reward={stats['rewards/mean']:.3f} | "
+                f"kl={stats['loss/kl']:.4f} | "
+                f"gen={t_gen:.1f}s | train={t_train:.1f}s | "
+                f"comp_len={stats['train/completion_len_mean']:.0f}"
+            )
 
         # ── 9. Return ─────────────────────────────────────────────────
         return loss.detach()
@@ -530,10 +571,16 @@ class GRPOTrainer(Trainer):
 
             # Unmerge so LoRA training can continue
             unwrapped.unmerge_adapter()
-            logger.info("Synced merged LoRA weights → vLLM")
+            if self.log_router:
+                self.log_router.log_inference("[cyan]Synced merged LoRA weights to vLLM[/cyan]")
+            else:
+                logger.info("Synced merged LoRA weights → vLLM")
         else:
             self.inference_engine.update_weights(unwrapped.state_dict())
-            logger.info("Synced policy weights → vLLM")
+            if self.log_router:
+                self.log_router.log_inference("[cyan]Synced policy weights to vLLM[/cyan]")
+            else:
+                logger.info("Synced policy weights → vLLM")
 
     # ================================================================
     #  Logging (merge GRPO metrics into Trainer logs)
@@ -586,6 +633,18 @@ class GRPOTrainer(Trainer):
                     )
             except ImportError:
                 pass
+
+        # ── Log router: emit HF Trainer metrics (grad_norm, lr) ────────
+        if self.log_router:
+            lr = logs.get("learning_rate")
+            gn = logs.get("grad_norm")
+            if lr is not None or gn is not None:
+                parts = []
+                if lr is not None:
+                    parts.append(f"lr=[magenta]{lr:.2e}[/magenta]")
+                if gn is not None:
+                    parts.append(f"grad_norm=[magenta]{gn:.4f}[/magenta]")
+                self.log_router.log_trainer("  " + "  ".join(parts))
 
         super().log(logs, start_time)
         self._grpo_metrics.clear()

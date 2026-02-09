@@ -8,6 +8,10 @@ extends HuggingFace Trainer.
 GPU layout (2-GPU default):
     cuda:0 → training model                      (trainer_gpu_id)
     cuda:1 → vLLM inference engine               (vllm_gpu_id)
+
+For the split-pane tmux experience, launch via:
+    python -m sync_rl.launch [args...]
+instead of calling this script directly.
 """
 
 import os
@@ -22,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sync_rl.config import GRPOConfig
 from sync_rl.trainer import GRPOTrainer
+from sync_rl.log_router import LogRouter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,16 +61,25 @@ def main():
         trust_remote_code=True,
     ).to(f"cuda:{config.trainer_gpu_id}")
 
+    # ── Log router (writes to files for tmux panes) ────────────────────
+    log_dir = os.path.join(config.output_dir, "logs")
+    log_router = LogRouter(log_dir=log_dir)
+    log_router.start()
+
     # ── Trainer ────────────────────────────────────────────────────────
     trainer = GRPOTrainer(
         model=model,
         args=config,
         processing_class=tokenizer,
+        log_router=log_router,
     )
 
     # ── Train ──────────────────────────────────────────────────────────
     logger.info("Starting GRPO training...")
-    trainer.train()
+    try:
+        trainer.train()
+    finally:
+        log_router.stop()
     logger.info("Training complete.")
 
 

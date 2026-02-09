@@ -18,6 +18,13 @@ from dataclasses import dataclass
 # the weight-loading function to the vLLM V1 worker subprocess.
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+# Suppress noisy vLLM subprocess logs so they don't corrupt the
+# Rich dashboard.  The subprocess inherits this env var.
+os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
+
+# Disable vLLM tqdm progress bars (they conflict with the Rich dashboard).
+os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
+
 import torch
 from vllm import LLM, SamplingParams
 
@@ -100,6 +107,7 @@ class VLLMInferenceEngine:
             trust_remote_code=True,
             enforce_eager=True,  # needed for weight updates
             enable_prefix_caching=False,
+            disable_log_stats=True,
         )
 
         # Restore CUDA_VISIBLE_DEVICES so the training process keeps
@@ -126,7 +134,7 @@ class VLLMInferenceEngine:
             completion_logprobs:  list of B * G lists of per-token log probs
                                   (from the vLLM sampling policy)
         """
-        outputs = self.llm.generate(prompts, self.sampling_params)
+        outputs = self.llm.generate(prompts, self.sampling_params, use_tqdm=False)
 
         completions: List[str] = []
         completion_token_ids: List[List[int]] = []
