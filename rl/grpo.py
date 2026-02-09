@@ -103,11 +103,11 @@ def grpo_loss(
         ).sum() / (num_valid_tokens + 1e-8)
 
     stats = {
-        "loss": loss.item(),
-        "pg_loss": masked_pg.item(),
-        "kl": masked_kl.item(),
-        "mean_ratio": mean_ratio.item(),
-        "clip_fraction": clip_frac.item(),
+        "loss/total": loss.item(),
+        "loss/pg_loss": masked_pg.item(),
+        "loss/kl": masked_kl.item(),
+        "train/importance_ratio": mean_ratio.item(),
+        "train/clip_fraction": clip_frac.item(),
     }
 
     return loss, stats

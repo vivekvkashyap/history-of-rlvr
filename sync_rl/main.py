@@ -15,7 +15,7 @@ import sys
 import logging
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 
 # Parent dir for cross-package imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    # ── Config ─────────────────────────────────────────────────────────
-    config = GRPOConfig()
+    # ── Config (parse CLI arguments) ──────────────────────────────────
+    parser = HfArgumentParser(GRPOConfig)
+    (config,) = parser.parse_args_into_dataclasses()
     logger.info(f"Model:  {config.model_name}")
     logger.info(f"GRPO:   G={config.num_generations}, eps={config.epsilon}, "
                 f"beta={config.beta}")

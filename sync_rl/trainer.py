@@ -10,6 +10,7 @@ the GRPO loss.
 
 import os
 import sys
+import time
 import random
 import logging
 from collections import defaultdict
@@ -145,6 +146,9 @@ class GRPOTrainer(Trainer):
         # ── Metric accumulator (merged into Trainer logs) ──────────────
         self._grpo_metrics: Dict[str, list] = defaultdict(list)
 
+        # ── Rollout buffer for wandb completions table ────────────────
+        self._grpo_rollouts: Optional[Dict[str, Any]] = None
+
     # ================================================================
     #  Prevent DataParallel (GPU 1 is reserved for vLLM)
     # ================================================================
@@ -198,8 +202,10 @@ class GRPOTrainer(Trainer):
         9. Return detached loss
         """
         # ── 1. Weight sync ─────────────────────────────────────────────
+        t0 = time.time()
         if self.state.global_step > 0:
             self._sync_vllm_weights()
+        t_sync = time.time() - t0
 
         model.train()
         device = self.accelerator.device
@@ -212,9 +218,11 @@ class GRPOTrainer(Trainer):
         B = len(prompts)
 
         # ── 3. Generate completions (+ inference logprobs from vLLM) ──
+        t0 = time.time()
         completions, completion_token_ids, completion_logprobs = (
             self.inference_engine.generate(prompts)
         )
+        t_gen = time.time() - t0
 
         # ── 4. Compute rewards ─────────────────────────────────────────
         expanded_gts = [gt for gt in ground_truths for _ in range(G)]
@@ -225,6 +233,7 @@ class GRPOTrainer(Trainer):
         advantages = compute_group_advantages(rewards_tensor, G)
 
         # ── 6. Tokenize & single forward pass ──────────────────────────
+        t0 = time.time()
         expanded_prompts = [p for p in prompts for _ in range(G)]
         grpo_inputs = self._prepare_grpo_inputs(
             expanded_prompts, completion_token_ids, completion_logprobs,
@@ -255,13 +264,44 @@ class GRPOTrainer(Trainer):
             )
 
         self.accelerator.backward(loss)
+        t_train = time.time() - t0
 
         # ── Accumulate GRPO metrics ────────────────────────────────────
-        stats["reward_mean"] = rewards_tensor.mean().item()
-        stats["reward_std"] = rewards_tensor.std().item()
-        stats["advantages_mean"] = advantages.mean().item()
+        # Reward metrics
+        stats["rewards/mean"] = rewards_tensor.mean().item()
+        stats["rewards/std"] = rewards_tensor.std().item()
+        stats["rewards/advantage_mean"] = advantages.mean().item()
+
+        # Training / generation metrics
+        comp_lengths = [len(ids) for ids in completion_token_ids]
+        stats["train/completion_len_mean"] = sum(comp_lengths) / len(comp_lengths)
+        stats["train/completion_len_max"] = float(max(comp_lengths))
+        stats["train/masked_fraction"] = 1.0 - (
+            loss_mask_shifted.sum() / loss_mask_shifted.numel()
+        ).item()
+        stats["train/sync_s"] = t_sync
+        stats["train/generate_s"] = t_gen
+        stats["train/train_s"] = t_train
+
         for key, value in stats.items():
             self._grpo_metrics[key].append(value)
+
+        # ── Store rollout for wandb completions table ─────────────────
+        self._grpo_rollouts = {
+            "prompts": prompts,
+            "completions": completions,
+            "rewards": rewards,
+        }
+
+        # ── Console summary ───────────────────────────────────────────
+        logger.info(
+            f"step {self.state.global_step} | "
+            f"loss={loss.item():.4f} | "
+            f"reward={stats['rewards/mean']:.3f} | "
+            f"kl={stats['loss/kl']:.4f} | "
+            f"gen={t_gen:.1f}s | train={t_train:.1f}s | "
+            f"comp_len={stats['train/completion_len_mean']:.0f}"
+        )
 
         # ── 9. Return ─────────────────────────────────────────────────
         return loss.detach()
@@ -501,7 +541,8 @@ class GRPOTrainer(Trainer):
 
     def log(self, logs: dict, start_time: Optional[float] = None) -> None:
         """
-        Override to inject accumulated GRPO metrics into every log call.
+        Override to inject accumulated GRPO metrics into every log call
+        and optionally log a wandb completions table.
         """
         # Average the accumulated GRPO metrics
         grpo_avg = {
@@ -510,6 +551,41 @@ class GRPOTrainer(Trainer):
             if vals
         }
         logs = {**logs, **grpo_avg}
+
+        # ── wandb completions table ───────────────────────────────────
+        if (
+            self._grpo_rollouts is not None
+            and self.args.report_to
+            and "wandb" in self.args.report_to
+        ):
+            try:
+                import wandb
+
+                if wandb.run is not None:
+                    rollouts = self._grpo_rollouts
+                    G = self.args.num_generations
+                    table_data = []
+                    for i, (comp, rew) in enumerate(
+                        zip(rollouts["completions"], rollouts["rewards"])
+                    ):
+                        prompt_idx = i // G
+                        table_data.append([
+                            self.state.global_step,
+                            rollouts["prompts"][prompt_idx],
+                            comp,
+                            rew,
+                        ])
+                    wandb.log(
+                        {
+                            "completions": wandb.Table(
+                                columns=["step", "prompt", "completion", "reward"],
+                                data=table_data,
+                            )
+                        },
+                        commit=False,
+                    )
+            except ImportError:
+                pass
 
         super().log(logs, start_time)
         self._grpo_metrics.clear()
