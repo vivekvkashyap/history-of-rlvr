@@ -72,6 +72,10 @@ def main():
         log(f"  Inflight ON  max_off_policy_steps={config.max_off_policy_steps}")
     else:
         log(f"  Inflight OFF (legacy blocking sync)")
+    if config.continuous_batching:
+        log(f"  ContBatch ON  pool_size={config.pool_size}")
+    else:
+        log(f"  ContBatch OFF (batch-at-a-time)")
     console.print()
 
     # ── Model + Tokenizer ──────────────────────────────────────────────

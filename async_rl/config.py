@@ -37,7 +37,7 @@ class AsyncGRPOConfig(TrainingArguments):
     model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
 
     # ── Generation / Inference ─────────────────────────────────────────
-    num_generations: int = 8          # G – group size per prompt
+    num_generations: int = 16          # G – group size per prompt
     max_new_tokens: int = 512         # max tokens per completion
     temperature: float = 0.7
     top_p: float = 0.95
@@ -75,16 +75,20 @@ class AsyncGRPOConfig(TrainingArguments):
     generation_timeout: float = 600.0     # max seconds to wait for a batch
     max_concurrent: int = 100             # max concurrent HTTP connections to vLLM
 
+    # ── Continuous batching ─────────────────────────────────────────────
+    continuous_batching: bool = True      # keep a saturated pool of rollout tasks
+    pool_size: int = 16                   # number of concurrent prompt-generation slots
+
     # ── In-flight weight updates (PipelineRL-style) ───────────────────
     inflight_weight_updates: bool = True  # push weights mid-generation
-    max_off_policy_steps: int = 1         # discard rollouts spanning more versions
+    max_off_policy_steps: int = 8         # discard rollouts spanning more versions
 
     # ── Device placement ───────────────────────────────────────────────
     trainer_gpu_id: int = 0               # GPU for training model
 
     # ── Override TrainingArguments defaults ─────────────────────────────
     output_dir: str = "outputs/async_grpo"
-    learning_rate: float = 5e-6
+    learning_rate: float = 1e-6
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     warmup_ratio: float = 0.03

@@ -6,9 +6,16 @@ completions via the vLLM OpenAI-compatible API, computes rewards and
 GRPO group-relative advantages, then packages the result into a Batch
 object that the trainer thread can consume.
 
-Communication with the main (trainer) thread uses two queues:
-  - request_queue: trainer submits batch IDs to generate
-  - result_queue:  worker delivers completed Batch objects
+Two operating modes:
+  - **Batch-at-a-time** (``continuous_batching=False``): the trainer
+    explicitly submits batch IDs; the orchestrator generates them one at
+    a time.  Communication uses ``request_queue`` / ``result_queue``.
+  - **Continuous batching** (``continuous_batching=True``): the
+    orchestrator maintains a saturated pool of ``pool_size`` concurrent
+    prompt-generation tasks.  Whenever a task completes its slot is
+    immediately repopulated, keeping the vLLM server at peak throughput.
+    Once ``batch_size`` results accumulate they are assembled into a
+    ``Batch`` and placed on ``result_queue``.
 
 Supports two weight-sync modes:
   - Legacy (inflight_weight_updates=False): trainer waits for generation
@@ -93,17 +100,29 @@ class Orchestrator:
     """
     Manages asynchronous batch generation in parallel with RL training.
 
-    Usage from the trainer:
-        orchestrator = Orchestrator(...)
+    Two operating modes:
+
+    **Batch-at-a-time** (``continuous_batching=False``):
         orchestrator.start()
         orchestrator.submit_batch(0)          # kick off first batch
-
         for step in range(max_steps):
             orchestrator.submit_batch(step + 1)  # pipeline next batch
             batch = orchestrator.get_batch(step)  # block for current
             ... training on batch ...
-
         orchestrator.stop()
+
+    **Continuous batching** (``continuous_batching=True``):
+        orchestrator.start()   # pool auto-generates immediately
+        for step in range(max_steps):
+            batch = orchestrator.get_batch(step)  # block for next batch
+            ... training on batch ...
+        orchestrator.stop()
+
+    In continuous batching mode the orchestrator maintains ``pool_size``
+    concurrent prompt-generation tasks.  Whenever a task completes its
+    slot is immediately repopulated, keeping the vLLM server saturated.
+    Once ``batch_size`` results accumulate they are assembled into a
+    ``Batch`` and delivered via the result queue.
     """
 
     def __init__(
@@ -131,6 +150,9 @@ class Orchestrator:
         # ── In-flight weight updates ──────────────────────────────────
         inflight_weight_updates: bool = False,
         max_off_policy_steps: int = 1,
+        # ── Continuous batching ───────────────────────────────────────
+        continuous_batching: bool = False,
+        pool_size: int = 16,
         # ── Log router (optional) ─────────────────────────────────────
         log_router: Any = None,
     ):
@@ -149,6 +171,8 @@ class Orchestrator:
         self.generation_timeout = generation_timeout
         self.inflight_weight_updates = inflight_weight_updates
         self.max_off_policy_steps = max_off_policy_steps
+        self.continuous_batching = continuous_batching
+        self.pool_size = pool_size
         self.log_router = log_router
 
         # Queues for thread communication
@@ -170,28 +194,76 @@ class Orchestrator:
         self.worker_loop: Optional[asyncio.AbstractEventLoop] = None
         self.client: Optional[AsyncOpenAI] = None
 
+        # ── Continuous pool pause/resume (for weight sync) ────────────
+        # When cleared, the pool stops spawning new tasks so that
+        # in-flight generation drains and vLLM workers become free for
+        # weight sync without contention.
+        self._pool_active = threading.Event()
+        self._pool_active.set()  # starts active
+        self._pool_in_flight: int = 0  # number of in-flight generation tasks
+
     # ════════════════════════════════════════════════════════════════════
     #  Public API (called from the trainer thread)
     # ════════════════════════════════════════════════════════════════════
 
     def start(self) -> None:
         """Start the async generation worker thread."""
+        if self.continuous_batching:
+            target = self._continuous_pool_worker
+            name = "ContinuousBatchPool"
+        else:
+            target = self._generation_worker
+            name = "AsyncBatchGenerator"
+
         self.worker_thread = threading.Thread(
-            target=self._generation_worker,
+            target=target,
             daemon=True,
-            name="AsyncBatchGenerator",
+            name=name,
         )
         self.worker_thread.start()
 
     def stop(self) -> None:
         """Stop the worker thread."""
         self.stop_event.set()
-        self.request_queue.put(None)  # poison pill
+        if not self.continuous_batching:
+            self.request_queue.put(None)  # poison pill (batch-at-a-time only)
         if self.worker_thread:
             self.worker_thread.join(timeout=10.0)
 
+    def pause_pool(self) -> None:
+        """
+        Pause the continuous batching pool.
+
+        Stops spawning new generation tasks so that in-flight requests
+        naturally drain.  Call before weight sync to eliminate contention
+        with ``engine.collective_rpc`` on the vLLM server.
+
+        No-op when ``continuous_batching`` is disabled.
+        """
+        if self.continuous_batching:
+            self._pool_active.clear()
+
+    def resume_pool(self) -> None:
+        """
+        Resume the continuous batching pool after a pause.
+
+        The pool will immediately start refilling to ``pool_size``
+        concurrent tasks.
+
+        No-op when ``continuous_batching`` is disabled.
+        """
+        if self.continuous_batching:
+            self._pool_active.set()
+
     def submit_batch(self, batch_id: int) -> None:
-        """Submit a batch generation request (non-blocking)."""
+        """
+        Submit a batch generation request (non-blocking).
+
+        No-op when ``continuous_batching`` is enabled because the pool
+        auto-generates prompts continuously.
+        """
+        if self.continuous_batching:
+            return  # pool manages its own work
         self.request_queue.put(batch_id)
 
     def get_batch(self, batch_id: int) -> Batch:
@@ -261,6 +333,158 @@ class Orchestrator:
             loop.run_until_complete(self.client.close())
             loop.close()
             asyncio.set_event_loop(None)
+
+    # ════════════════════════════════════════════════════════════════════
+    #  Continuous batching pool (alternative to batch-at-a-time worker)
+    # ════════════════════════════════════════════════════════════════════
+
+    def _continuous_pool_worker(self) -> None:
+        """
+        Worker thread entry for continuous batching mode.
+
+        Runs an asyncio event loop that keeps ``pool_size`` prompt-level
+        generation tasks in flight at all times.  Completed results
+        accumulate in a buffer; once ``batch_size`` results are ready a
+        ``Batch`` is assembled and placed on ``result_queue``.
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.worker_loop = loop
+
+        # Create the async OpenAI client inside the worker thread
+        self.client = AsyncOpenAI(
+            base_url=self.server_base_url,
+            api_key="EMPTY",
+            http_client=httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=self.max_concurrent),
+                timeout=self.client_timeout,
+            ),
+        )
+
+        try:
+            loop.run_until_complete(self._run_continuous_pool())
+        except Exception as e:
+            logger.error(f"Error in continuous pool worker: {e}")
+            raise
+        finally:
+            loop.run_until_complete(self.client.close())
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    async def _run_continuous_pool(self) -> None:
+        """
+        Keep ``pool_size`` prompt-generation tasks always in flight.
+
+        When any task completes its slot is immediately repopulated so
+        that the vLLM server always sees a constant number of requests,
+        sustaining peak inference throughput without synchronous batch
+        boundaries.
+
+        Once ``batch_size`` prompt results have accumulated they are
+        assembled into a ``Batch`` (with off-policy filtering, rewards,
+        advantages, and tensor preparation) and placed on ``result_queue``
+        for the trainer thread.
+
+        Note: batch assembly (reward computation, tokenisation, tensor
+        preparation) runs synchronously on the event loop because the
+        HuggingFace fast tokenizer is not thread-safe.  The assembly
+        time is small relative to generation latency so the stall is
+        negligible.
+        """
+        assert self.client is not None
+        self.is_generating = True
+
+        G = self.num_generations
+        batch_id = 0
+        t_batch_start = time.time()
+        pending_results: List[tuple] = []  # (prompt_data, gen_result)
+        results_queue: asyncio.Queue = asyncio.Queue()
+
+        if self.log_router:
+            self.log_router.log_inference(
+                f"[bold cyan]Continuous batching pool started "
+                f"(pool_size={self.pool_size}, "
+                f"batch_size={self.batch_size})[/bold cyan]"
+            )
+
+        async def _generate_one() -> None:
+            """Generate completions for one sampled prompt."""
+            prompt_data = self._sample_prompt()
+            try:
+                gen_result = await self._generate_single_prompt(
+                    prompt_data["prompt"], G,
+                )
+                await results_queue.put((prompt_data, gen_result))
+            except Exception as e:
+                logger.error(f"Prompt generation failed: {e}")
+                # Put an error marker so the slot can still be repopulated
+                await results_queue.put(None)
+
+        def _spawn_task() -> None:
+            """Spawn a single generation task and track it."""
+            task = asyncio.ensure_future(_generate_one())
+            active_tasks.add(task)
+            task.add_done_callback(active_tasks.discard)
+            self._pool_in_flight = len(active_tasks)
+
+        # Seed the pool with pool_size concurrent tasks
+        active_tasks: set = set()
+        for _ in range(self.pool_size):
+            _spawn_task()
+
+        # Main loop: collect results, repopulate slots, assemble batches
+        while not self.stop_event.is_set():
+            # Wait for the next completed result (with a short timeout so
+            # we can check the stop event periodically)
+            try:
+                result = await asyncio.wait_for(
+                    results_queue.get(), timeout=0.5,
+                )
+            except asyncio.TimeoutError:
+                # While paused, update in-flight count (tasks are draining)
+                self._pool_in_flight = len(active_tasks)
+
+                # While paused and pool is drained, refill when resumed
+                if self._pool_active.is_set() and len(active_tasks) < self.pool_size:
+                    deficit = self.pool_size - len(active_tasks)
+                    for _ in range(deficit):
+                        _spawn_task()
+                continue
+
+            # Update in-flight count after a task completed
+            self._pool_in_flight = len(active_tasks)
+
+            # Only repopulate the slot if the pool is active (not paused
+            # for weight sync).  When paused, in-flight tasks naturally
+            # drain, freeing vLLM workers for contention-free weight sync.
+            if self._pool_active.is_set():
+                _spawn_task()
+
+            # Skip failed generations
+            if result is None:
+                continue
+
+            pending_results.append(result)
+
+            # When enough results have accumulated, assemble a Batch
+            if len(pending_results) >= self.batch_size:
+                batch_items = pending_results[:self.batch_size]
+                pending_results = pending_results[self.batch_size:]
+
+                batch = self._assemble_batch(
+                    batch_items, batch_id, t_batch_start,
+                )
+                self.result_queue.put(batch)
+                batch_id += 1
+                t_batch_start = time.time()
+
+        # ── Drain: cancel remaining tasks on shutdown ─────────────────
+        self.is_generating = False
+        self._pool_in_flight = 0
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
 
     # ════════════════════════════════════════════════════════════════════
     #  Batch generation (runs inside the worker's asyncio loop)
@@ -520,6 +744,184 @@ class Orchestrator:
             logprobs_list.append(lps)
 
         return completions, token_ids_list, logprobs_list, start_version, end_version
+
+    # ════════════════════════════════════════════════════════════════════
+    #  Prompt sampling helper
+    # ════════════════════════════════════════════════════════════════════
+
+    def _sample_prompt(self) -> Dict[str, str]:
+        """
+        Sample a single prompt + ground_truth from the dataset.
+
+        Returns:
+            {"prompt": str, "ground_truth": str}
+        """
+        idx = random.randint(0, len(self.dataset) - 1)
+        item = self.dataset[idx]
+        return {"prompt": item["prompt"], "ground_truth": item["ground_truth"]}
+
+    # ════════════════════════════════════════════════════════════════════
+    #  Batch assembly (used by continuous batching pool)
+    # ════════════════════════════════════════════════════════════════════
+
+    def _assemble_batch(
+        self,
+        items: List[tuple],
+        batch_id: int,
+        t_start: float,
+    ) -> Batch:
+        """
+        Assemble a Batch from a list of completed prompt results.
+
+        Each element of *items* is a tuple of
+        ``(prompt_data, generation_result)`` where:
+          - ``prompt_data`` is ``{"prompt": str, "ground_truth": str}``
+          - ``generation_result`` is the 5-tuple returned by
+            ``_generate_single_prompt``:
+            ``(completions, token_ids, logprobs, start_ver, end_ver)``
+
+        Performs off-policy filtering, reward computation, GRPO advantage
+        computation, and tensor preparation -- the same post-processing
+        that ``_generate_batch`` does, but over individually-collected
+        prompt results rather than a synchronous batch.
+        """
+        G = self.num_generations
+
+        prompts = [item[0]["prompt"] for item in items]
+        ground_truths = [item[0]["ground_truth"] for item in items]
+        results = [item[1] for item in items]
+        B = len(prompts)
+
+        # ── Off-policy filtering ──────────────────────────────────────
+        all_start_versions: List[int] = [r[3] for r in results]
+        all_end_versions: List[int] = [r[4] for r in results]
+
+        if self.inflight_weight_updates:
+            valid_indices: List[int] = []
+            for i, (sv, ev) in enumerate(
+                zip(all_start_versions, all_end_versions)
+            ):
+                if ev - sv <= self.max_off_policy_steps:
+                    valid_indices.append(i)
+
+            num_discarded = B - len(valid_indices)
+
+            if num_discarded > 0 and self.log_router:
+                self.log_router.log_inference(
+                    f"[yellow]Discarded {num_discarded}/{B} prompts "
+                    f"(off-policy span > {self.max_off_policy_steps})[/yellow]"
+                )
+
+            if len(valid_indices) == 0:
+                ver_min = min(all_start_versions) if all_start_versions else 0
+                ver_max = max(all_end_versions) if all_end_versions else 0
+                t_gen = time.time() - t_start
+                if self.log_router:
+                    self.log_router.log_inference(
+                        f"[red]All {B} prompts discarded for batch "
+                        f"{batch_id} – returning empty batch[/red]"
+                    )
+                empty = torch.zeros(0)
+                return Batch(
+                    batch_id=batch_id,
+                    input_ids=empty, attention_mask=empty,
+                    loss_mask=empty, inference_logprobs=empty,
+                    advantages=empty,
+                    num_valid_prompts=0,
+                    policy_version_min=ver_min,
+                    policy_version_max=ver_max,
+                    generation_time=t_gen,
+                    metrics={
+                        "train/num_discarded_prompts": float(B),
+                        "train/generate_s": t_gen,
+                    },
+                )
+
+            # Re-index to keep only valid prompts
+            results = [results[i] for i in valid_indices]
+            prompts = [prompts[i] for i in valid_indices]
+            ground_truths = [ground_truths[i] for i in valid_indices]
+            all_start_versions = [all_start_versions[i] for i in valid_indices]
+            all_end_versions = [all_end_versions[i] for i in valid_indices]
+            B = len(prompts)
+        else:
+            num_discarded = 0
+
+        # ── Flatten per-prompt results ────────────────────────────────
+        all_completions: List[str] = []
+        all_token_ids: List[List[int]] = []
+        all_logprobs: List[List[float]] = []
+
+        for comps, tok_ids, lps, _, _ in results:
+            all_completions.extend(comps)
+            all_token_ids.extend(tok_ids)
+            all_logprobs.extend(lps)
+
+        t_gen = time.time() - t_start
+
+        # ── Post-generation stats ─────────────────────────────────────
+        comp_lengths = [len(ids) for ids in all_token_ids]
+        avg_comp_len = sum(comp_lengths) / max(len(comp_lengths), 1)
+        max_comp_len = float(max(comp_lengths)) if comp_lengths else 0.0
+        total_tokens = sum(comp_lengths)
+        tok_per_s = total_tokens / t_gen if t_gen > 0 else 0.0
+
+        if self.log_router:
+            self.log_router.log_inference(
+                f"Assembled batch [bold]{batch_id}[/bold]: "
+                f"[bold]{B * G}[/bold] completions in "
+                f"[yellow]{t_gen:.1f}s[/yellow]  "
+                f"([dim]{tok_per_s:.0f} tok/s, avg {avg_comp_len:.0f} tok, "
+                f"max {max_comp_len:.0f} tok[/dim])"
+            )
+
+        # ── Compute rewards ───────────────────────────────────────────
+        expanded_gts = [gt for gt in ground_truths for _ in range(G)]
+        rewards = compute_rewards_batch(all_completions, expanded_gts)
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+
+        # ── GRPO group-relative advantages ────────────────────────────
+        advantages = compute_group_advantages(rewards_tensor, G)
+
+        # ── Tokenize & build tensors ──────────────────────────────────
+        expanded_prompts = [p for p in prompts for _ in range(G)]
+        batch_tensors = self._prepare_tensors(
+            expanded_prompts, all_token_ids, all_logprobs,
+        )
+
+        # ── Policy version range ──────────────────────────────────────
+        ver_min = min(all_start_versions) if all_start_versions else 0
+        ver_max = max(all_end_versions) if all_end_versions else 0
+
+        # ── Metrics ───────────────────────────────────────────────────
+        metrics = {
+            "rewards/mean": rewards_tensor.mean().item(),
+            "rewards/std": rewards_tensor.std().item(),
+            "rewards/advantage_mean": advantages.mean().item(),
+            "train/completion_len_mean": avg_comp_len,
+            "train/completion_len_max": max_comp_len,
+            "train/generate_s": t_gen,
+            "train/num_discarded_prompts": float(num_discarded),
+            "train/policy_version_min": float(ver_min),
+            "train/policy_version_max": float(ver_max),
+        }
+
+        return Batch(
+            batch_id=batch_id,
+            input_ids=batch_tensors["input_ids"],
+            attention_mask=batch_tensors["attention_mask"],
+            loss_mask=batch_tensors["loss_mask"],
+            inference_logprobs=batch_tensors["inference_logprobs"],
+            advantages=advantages,
+            num_valid_prompts=B,
+            policy_version_min=ver_min,
+            policy_version_max=ver_max,
+            generation_time=t_gen,
+            prompts=prompts,
+            completions=all_completions,
+            rewards=rewards,
+            metrics=metrics,
+        )
 
     # ════════════════════════════════════════════════════════════════════
     #  Tensor preparation (mirrors sync_rl trainer._prepare_grpo_inputs)
