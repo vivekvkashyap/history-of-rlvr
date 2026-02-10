@@ -185,7 +185,7 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     warnings.filterwarnings("ignore", message=".*use_cache=True.*")
     warnings.filterwarnings("ignore", message=".*PAD/BOS/EOS.*")
 
-    console = Console(force_terminal=True)
+    console = Console(force_terminal=True, highlight=False)
 
     # ── Parse config ──────────────────────────────────────────────────
     # Inject cli_args so HfArgumentParser picks them up
@@ -196,7 +196,7 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     sys.argv = old_argv
 
     console.print()
-    console.rule(f"[bold]{env.name}[/bold] – Async GRPO Training")
+    console.rule(f"{env.name} – Async GRPO Training")
     console.print()
     console.print(f"  Environment  {env.name}")
     console.print(f"  Model        {config.model_name}")
@@ -217,12 +217,12 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     console.print()
 
     # ── Build dataset ─────────────────────────────────────────────────
-    console.print(f"[green]Loading {env.name} dataset...[/green]")
+    console.print(f"Loading {env.name} dataset...")
     dataset = EnvironmentDataset(env.get_dataset())
-    console.print(f"[green]{len(dataset)} examples loaded.[/green]")
+    console.print(f"{len(dataset)} examples loaded.")
 
     # ── Model + Tokenizer ─────────────────────────────────────────────
-    console.print("[green]Loading model and tokenizer...[/green]")
+    console.print("Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name,
         trust_remote_code=True,
@@ -230,10 +230,20 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     )
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(f"cuda:{config.trainer_gpu_id}")
-    console.print("[green]Model loaded.[/green]")
+
+    # Align model config with tokenizer so Trainer doesn't emit
+    # "PAD/BOS/EOS tokens differ" warnings
+    if tokenizer.pad_token_id is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+    if tokenizer.bos_token_id is not None:
+        model.config.bos_token_id = tokenizer.bos_token_id
+    if tokenizer.eos_token_id is not None:
+        model.config.eos_token_id = tokenizer.eos_token_id
+
+    console.print("Model loaded.")
 
     # ── Log router ────────────────────────────────────────────────────
     log_dir = os.path.join(config.output_dir, "logs")
@@ -241,7 +251,7 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     log_router.start()
 
     # ── Trainer ────────────────────────────────────────────────────────
-    console.print("[green]Initialising trainer + NCCL communicator...[/green]")
+    console.print("Initialising trainer + NCCL communicator...")
     trainer = AsyncGRPOTrainer(
         model=model,
         args=config,
@@ -250,8 +260,8 @@ def _train(env: Environment, cli_args: List[str]) -> None:
         reward_fn=env.compute_rewards,
         log_router=log_router,
     )
-    console.print("[green]Trainer ready. Starting training...[/green]")
-    console.rule("[green]Training[/green]")
+    console.print("Trainer ready. Starting training...")
+    console.rule("Training")
     console.print()
 
     # ── Train ─────────────────────────────────────────────────────────
@@ -260,7 +270,7 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     finally:
         log_router.stop()
     console.print()
-    console.rule("[bold green]Training Complete[/bold green]")
+    console.rule("Training Complete")
 
 
 # ════════════════════════════════════════════════════════════════════════

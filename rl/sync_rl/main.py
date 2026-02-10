@@ -57,9 +57,18 @@ def main():
     )
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(f"cuda:{config.trainer_gpu_id}")
+
+    # Align model config with tokenizer so Trainer doesn't emit
+    # "PAD/BOS/EOS tokens differ" warnings
+    if tokenizer.pad_token_id is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+    if tokenizer.bos_token_id is not None:
+        model.config.bos_token_id = tokenizer.bos_token_id
+    if tokenizer.eos_token_id is not None:
+        model.config.eos_token_id = tokenizer.eos_token_id
 
     # ── Log router (writes to files for tmux panes) ────────────────────
     log_dir = os.path.join(config.output_dir, "logs")
