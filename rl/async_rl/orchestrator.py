@@ -45,10 +45,10 @@ import torch
 from openai import AsyncOpenAI
 
 # Parent dir for cross-package imports (history_of_rlvr/)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from rl.grpo import compute_group_advantages
-from sync_rl.data import GSM8KDataset
-from sync_rl.reward import compute_rewards_batch
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+from rl.algorithms.grpo.grpo import compute_group_advantages
+from rl.sync_rl.data import GSM8KDataset
+from rl.sync_rl.reward import compute_rewards_batch
 
 logger = logging.getLogger(__name__)
 

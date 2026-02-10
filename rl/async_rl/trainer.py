@@ -29,14 +29,14 @@ from transformers.trainer import Trainer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 # Parent dir for cross-package imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from rl.grpo import grpo_loss
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+from rl.algorithms.grpo.grpo import grpo_loss
 
-from async_rl.config import AsyncGRPOConfig
-from async_rl.client import VLLMClient
-from async_rl.display import print_examples
-from async_rl.orchestrator import Orchestrator, Batch
-from sync_rl.data import GSM8KDataset
+from rl.async_rl.config import AsyncGRPOConfig
+from rl.async_rl.client import VLLMClient
+from rl.async_rl.display import print_examples
+from rl.async_rl.orchestrator import Orchestrator, Batch
+from rl.sync_rl.data import GSM8KDataset
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ Based on the verifiers-rl inference server, made fully standalone
 (no verifiers package dependency).
 
 Usage:
-    python -m async_rl.server \\
+    python -m rl.async_rl.server \\
         --model Qwen/Qwen2.5-0.5B-Instruct \\
         --port 8000 \\
         --tensor-parallel-size 1 \\
@@ -145,7 +145,7 @@ async def run_server(args: Namespace) -> None:
     # ── Engine ─────────────────────────────────────────────────────────
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args.worker_extension_cls = (
-        "async_rl.server.WeightSyncWorkerExtension"
+        "rl.async_rl.server.WeightSyncWorkerExtension"
     )
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER,

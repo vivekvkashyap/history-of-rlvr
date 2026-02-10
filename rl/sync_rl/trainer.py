@@ -25,13 +25,13 @@ from transformers.trainer import Trainer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 # Parent dir for cross-package imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from rl.grpo import compute_group_advantages, grpo_loss
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+from rl.algorithms.grpo.grpo import compute_group_advantages, grpo_loss
 
-from sync_rl.config import GRPOConfig
-from sync_rl.data import GSM8KDataset
-from sync_rl.reward import compute_rewards_batch
-from sync_rl.inference import VLLMInferenceEngine, InferenceConfig
+from rl.sync_rl.config import GRPOConfig
+from rl.sync_rl.data import GSM8KDataset
+from rl.sync_rl.reward import compute_rewards_batch
+from rl.sync_rl.inference import VLLMInferenceEngine, InferenceConfig
 
 logger = logging.getLogger(__name__)
 
