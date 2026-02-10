@@ -34,6 +34,7 @@ from rl.grpo import grpo_loss
 
 from async_rl.config import AsyncGRPOConfig
 from async_rl.client import VLLMClient
+from async_rl.display import print_examples
 from async_rl.orchestrator import Orchestrator, Batch
 from sync_rl.data import GSM8KDataset
 
@@ -760,6 +761,22 @@ class AsyncGRPOTrainer(Trainer):
                     )
             except ImportError:
                 pass
+
+        # ── Print evaluation examples every N steps ────────────────────
+        if (
+            self._grpo_rollouts is not None
+            and self.state.global_step > 0
+            and self.state.global_step % self.args.eval_display_steps == 0
+        ):
+            rollouts = self._grpo_rollouts
+            print_examples(
+                prompts=rollouts["prompts"],
+                completions=rollouts["completions"],
+                rewards=rollouts["rewards"],
+                step=self.state.global_step,
+                num_samples=self.args.eval_num_samples,
+                num_generations=self.args.num_generations,
+            )
 
         # ── Log router: combine buffered step line + lr/grad_norm ──────
         if self.log_router and hasattr(self, "_pending_trainer_line"):

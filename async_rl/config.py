@@ -83,6 +83,10 @@ class AsyncGRPOConfig(TrainingArguments):
     inflight_weight_updates: bool = True  # push weights mid-generation
     max_off_policy_steps: int = 8         # discard rollouts spanning more versions
 
+    # ── Evaluation / Display ───────────────────────────────────────────
+    eval_display_steps: int = 10          # print examples every N steps
+    eval_num_samples: int = 2             # number of examples to print
+
     # ── Device placement ───────────────────────────────────────────────
     trainer_gpu_id: int = 0               # GPU for training model
 
