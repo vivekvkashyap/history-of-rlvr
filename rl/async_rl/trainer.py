@@ -337,28 +337,60 @@ class AsyncGRPOTrainer(Trainer):
         inference_logprobs = batch.inference_logprobs.to(device)
         advantages = batch.advantages.to(device)
 
-        # ── 4. Forward pass -> trainer logprobs ────────────────────────
+        # ── 4 + 5 + 6. Micro-batched forward + loss + backward ────────
         t0 = time.time()
         torch.cuda.empty_cache()
-        trainer_logprobs = self._get_logprobs(model, input_ids, attention_mask)
 
-        # Shift loss_mask to match the shifted logprobs (logits[:, :-1])
-        loss_mask_shifted = loss_mask[:, 1:]
+        total_seqs = input_ids.shape[0]
+        micro_bs = self.args.micro_batch_size
+        num_micro = (total_seqs + micro_bs - 1) // micro_bs
+        inv_total = 1.0 / float(total_seqs)
 
-        # ── 5 + 6. GRPO loss + backward ───────────────────────────────
-        with self.compute_loss_context_manager():
-            loss, stats = self.compute_loss(
-                model,
-                {
-                    "trainer_logprobs": trainer_logprobs,
-                    "inference_logprobs": inference_logprobs,
-                    "advantages": advantages,
-                    "loss_mask": loss_mask_shifted,
-                },
-                return_outputs=True,
+        total_loss = torch.zeros((), device=device)
+        accumulated_stats: Dict[str, float] = defaultdict(float)
+        total_masked_tokens = 0
+        total_mask_elements = 0
+
+        for i in range(num_micro):
+            s = i * micro_bs
+            e = min(s + micro_bs, total_seqs)
+            mb_size = e - s
+
+            mb_logprobs = self._get_logprobs(
+                model, input_ids[s:e], attention_mask[s:e],
             )
+            mb_loss_mask = loss_mask[s:e, 1:]
 
-        self.accelerator.backward(loss)
+            with self.compute_loss_context_manager():
+                mb_loss, mb_stats = self.compute_loss(
+                    model,
+                    {
+                        "trainer_logprobs": mb_logprobs,
+                        "inference_logprobs": inference_logprobs[s:e],
+                        "advantages": advantages[s:e],
+                        "loss_mask": mb_loss_mask,
+                    },
+                    return_outputs=True,
+                )
+
+            # Scale loss by micro-batch fraction for correct gradient averaging
+            scale = float(mb_size) * inv_total
+            self.accelerator.backward(mb_loss * scale)
+
+            total_loss = total_loss + mb_loss.detach() * scale
+            for k, v in mb_stats.items():
+                accumulated_stats[k] += v * scale
+
+            # Track mask stats across micro-batches
+            total_masked_tokens += int(mb_loss_mask.sum().item())
+            total_mask_elements += mb_loss_mask.numel()
+
+            # Free memory between micro-batches
+            del mb_logprobs, mb_loss
+            torch.cuda.empty_cache()
+
+        loss = total_loss
+        stats = dict(accumulated_stats)
         t_train = time.time() - t0
 
         # ── Accumulate GRPO metrics ────────────────────────────────────
@@ -369,8 +401,8 @@ class AsyncGRPOTrainer(Trainer):
         stats["train/train_s"] = t_train
         stats["train/skipped_step"] = 0.0
         stats["train/masked_fraction"] = 1.0 - (
-            loss_mask_shifted.sum() / loss_mask_shifted.numel()
-        ).item()
+            total_masked_tokens / max(total_mask_elements, 1)
+        )
 
         for key, value in stats.items():
             self._grpo_metrics[key].append(value)

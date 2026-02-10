@@ -37,24 +37,25 @@ class AsyncGRPOConfig(TrainingArguments):
     model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
 
     # ── Generation / Inference ─────────────────────────────────────────
-    num_generations: int = 16         # G – group size per prompt (increased for better advantage estimation)
-    max_new_tokens: int = 512         # max tokens per completion
-    temperature: float = 1.0          # higher temp for more exploration
-    top_p: float = 0.95
+    num_generations: int = 16         # G – group size per prompt
+    max_new_tokens: int = 1024        # max tokens per completion
+    temperature: float = 1.0
+    top_p: float = 1.0
 
     # ── GRPO objective ─────────────────────────────────────────────────
     epsilon: float = 0.2              # clipping range for policy ratio
     beta: float = 0.01                # KL penalty coefficient (lower = less restrictive)
     max_log_ratio: float = 10.0       # clamp log ratios to prevent exp overflow (increased for stability)
 
-    # ── Batch (number of *prompts* sampled per training step) ──────────
-    batch_size: int = 4               # increased for lower variance
+    # ── Batch ───────────────────────────────────────────────────────────
+    batch_size: int = 512             # total rollouts (completions) per training step
+    micro_batch_size: int = 8         # sequences per forward+backward pass
 
     # ── LoRA / PEFT ────────────────────────────────────────────────────
     use_lora: bool = True
-    lora_rank: int = 16
-    lora_alpha: int = 64              # 4x rank for proper scaling
-    lora_dropout: float = 0.05
+    lora_rank: int = 8
+    lora_alpha: int = 32              # 4x rank for proper scaling
+    lora_dropout: float = 0.0
     lora_target_modules: Optional[List[str]] = None   # None → DEFAULT_LORA_TARGET_MODULES
     lora_modules_to_save: Optional[List[str]] = None
     lora_use_rslora: bool = False
@@ -64,7 +65,7 @@ class AsyncGRPOConfig(TrainingArguments):
     dataset_name: str = "openai/gsm8k"
     dataset_config: str = "main"
     dataset_split: str = "train"
-    max_prompt_length: int = 256
+    max_prompt_length: int = 512
 
     # ── vLLM server connection ─────────────────────────────────────────
     vllm_server_host: str = "0.0.0.0"
@@ -74,7 +75,7 @@ class AsyncGRPOConfig(TrainingArguments):
 
     # ── Async orchestration ────────────────────────────────────────────
     generation_timeout: float = 600.0     # max seconds to wait for a batch
-    max_concurrent: int = 100             # max concurrent HTTP connections to vLLM
+    max_concurrent: int = 1024            # max concurrent HTTP connections to vLLM
 
     # ── Continuous batching ─────────────────────────────────────────────
     continuous_batching: bool = True      # keep a saturated pool of rollout tasks
@@ -93,29 +94,36 @@ class AsyncGRPOConfig(TrainingArguments):
 
     # ── Override TrainingArguments defaults ─────────────────────────────
     output_dir: str = "outputs/async_grpo"
-    learning_rate: float = 5e-6       # matches Will Brown's GRPO recipe
+    learning_rate: float = 1e-5
     adam_beta1: float = 0.9
-    adam_beta2: float = 0.99
-    weight_decay: float = 0.1
-    max_grad_norm: float = 0.1        # tighter clipping for stability
-    warmup_ratio: float = 0.1         # longer warmup for stability
-    lr_scheduler_type: str = "cosine"
+    adam_beta2: float = 0.999
+    weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    lr_scheduler_type: str = "constant"
     max_steps: int = 500
     logging_steps: int = 1
-    save_steps: int = 100
+    save_steps: int = 50
     save_strategy: str = "steps"
     bf16: bool = True
     seed: int = 42
     per_device_train_batch_size: int = 1   # dummy – real batch comes from orchestrator
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 1   # grad accum handled by micro-batch loop
     remove_unused_columns: bool = False
-    gradient_checkpointing: bool = True    # trade compute for memory
-    gradient_checkpointing_kwargs: Optional[Dict] = field(
-        default_factory=lambda: {"use_reentrant": False}
-    )  # use_reentrant=False required for LoRA (frozen params)
-    report_to: str = "wandb"                # W&B logging enabled
+    gradient_checkpointing: bool = False
+    log_on_each_node: bool = False
+    report_to: str = "wandb"
 
     def __post_init__(self):
+        # ── Validate batch / micro-batch divisibility ──────────────────
+        assert self.batch_size % self.num_generations == 0, (
+            f"batch_size ({self.batch_size}) must be divisible by "
+            f"num_generations ({self.num_generations})."
+        )
+        assert self.batch_size % self.micro_batch_size == 0, (
+            f"batch_size ({self.batch_size}) must be divisible by "
+            f"micro_batch_size ({self.micro_batch_size})."
+        )
+
         # ── Build LoRA config from individual fields ───────────────────
         if not self.use_lora:
             self.lora_config = None

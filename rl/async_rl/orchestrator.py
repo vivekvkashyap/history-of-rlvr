@@ -14,8 +14,8 @@ Two operating modes:
     orchestrator maintains a saturated pool of ``pool_size`` concurrent
     prompt-generation tasks.  Whenever a task completes its slot is
     immediately repopulated, keeping the vLLM server at peak throughput.
-    Once ``batch_size`` results accumulate they are assembled into a
-    ``Batch`` and placed on ``result_queue``.
+    Once ``batch_size // num_generations`` prompt results accumulate
+    they are assembled into a ``Batch`` and placed on ``result_queue``.
 
 Supports two weight-sync modes:
   - Legacy (inflight_weight_updates=False): trainer waits for generation
@@ -122,8 +122,8 @@ class Orchestrator:
     In continuous batching mode the orchestrator maintains ``pool_size``
     concurrent prompt-generation tasks.  Whenever a task completes its
     slot is immediately repopulated, keeping the vLLM server saturated.
-    Once ``batch_size`` results accumulate they are assembled into a
-    ``Batch`` and delivered via the result queue.
+    Once ``batch_size // num_generations`` prompt results accumulate
+    they are assembled into a ``Batch`` and delivered via the result queue.
     """
 
     def __init__(
@@ -167,7 +167,8 @@ class Orchestrator:
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
-        self.batch_size = batch_size
+        self.batch_size = batch_size                          # total rollouts per step
+        self.num_prompts = batch_size // num_generations       # prompts per step
         self.dataset = dataset
         self.reward_fn = reward_fn
         self.tokenizer = tokenizer
@@ -348,7 +349,7 @@ class Orchestrator:
 
         Runs an asyncio event loop that keeps ``pool_size`` prompt-level
         generation tasks in flight at all times.  Completed results
-        accumulate in a buffer; once ``batch_size`` results are ready a
+        accumulate in a buffer; once ``num_prompts`` results are ready a
         ``Batch`` is assembled and placed on ``result_queue``.
         """
         loop = asyncio.new_event_loop()
@@ -384,7 +385,7 @@ class Orchestrator:
         sustaining peak inference throughput without synchronous batch
         boundaries.
 
-        Once ``batch_size`` prompt results have accumulated they are
+        Once ``num_prompts`` prompt results have accumulated they are
         assembled into a ``Batch`` (with off-policy filtering, rewards,
         advantages, and tensor preparation) and placed on ``result_queue``
         for the trainer thread.
@@ -408,7 +409,8 @@ class Orchestrator:
             self.log_router.log_inference(
                 f"[bold cyan]Continuous batching pool started "
                 f"(pool_size={self.pool_size}, "
-                f"batch_size={self.batch_size})[/bold cyan]"
+                f"batch_size={self.batch_size}, "
+                f"prompts_per_batch={self.num_prompts})[/bold cyan]"
             )
 
         async def _generate_one() -> None:
@@ -470,10 +472,10 @@ class Orchestrator:
 
             pending_results.append(result)
 
-            # When enough results have accumulated, assemble a Batch
-            if len(pending_results) >= self.batch_size:
-                batch_items = pending_results[:self.batch_size]
-                pending_results = pending_results[self.batch_size:]
+            # When enough prompt results have accumulated, assemble a Batch
+            if len(pending_results) >= self.num_prompts:
+                batch_items = pending_results[:self.num_prompts]
+                pending_results = pending_results[self.num_prompts:]
 
                 batch = self._assemble_batch(
                     batch_items, batch_id, t_batch_start,
@@ -499,7 +501,7 @@ class Orchestrator:
         Generate a full batch of completions via the vLLM server.
 
         Steps:
-          1. Sample batch_size prompts from the dataset
+          1. Sample num_prompts prompts from the dataset
           2. For each prompt, request num_generations completions
           2b. (In-flight mode) Filter off-policy prompts
           3. Compute rewards via the injected reward function
@@ -514,7 +516,7 @@ class Orchestrator:
 
         # ── 1. Sample prompts ──────────────────────────────────────────
         n = len(self.dataset)
-        indices = random.sample(range(n), min(self.batch_size, n))
+        indices = random.sample(range(n), min(self.num_prompts, n))
         items = [self.dataset[i] for i in indices]
         prompts = [item["prompt"] for item in items]
         ground_truths = [item["ground_truth"] for item in items]

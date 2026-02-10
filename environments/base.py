@@ -201,7 +201,7 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     console.print(f"  Environment  {env.name}")
     console.print(f"  Model        {config.model_name}")
     console.print(f"  GRPO         G={config.num_generations}  eps={config.epsilon}  beta={config.beta}")
-    console.print(f"  Train        lr={config.learning_rate}  steps={config.max_steps}  batch={config.batch_size}")
+    console.print(f"  Train        lr={config.learning_rate}  steps={config.max_steps}  batch={config.batch_size}  micro={config.micro_batch_size}")
     console.print(f"  Server       {config.vllm_server_host}:{config.vllm_server_port}")
     console.print(f"  GPU          trainer=cuda:{config.trainer_gpu_id}")
     if config.use_lora:
