@@ -140,10 +140,13 @@ class GSM8K(Environment):
             return ""
         try:
             val = float(s)
+            # Handle infinity and NaN
+            if not (val == val) or abs(val) == float('inf'):
+                return s  # Return original string for invalid numbers
             if val == int(val):
                 return str(int(val))
             return str(val)
-        except ValueError:
+        except (ValueError, OverflowError):
             return s
 
     @classmethod

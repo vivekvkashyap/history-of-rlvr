@@ -44,6 +44,7 @@ def grpo_loss(
     completion_mask: torch.Tensor,
     epsilon: float = 0.2,
     beta: float = 0.04,
+    max_log_ratio: float = 10.0,
 ) -> Tuple[torch.Tensor, dict]:
     """
     Compute the full GRPO loss.
@@ -64,13 +65,17 @@ def grpo_loss(
         completion_mask:     (B * G, seq_len) binary mask (1 for real tokens, 0 for padding)
         epsilon:             clipping range
         beta:                KL penalty coefficient
+        max_log_ratio:       clamp log ratios to ±this value (prevents exp overflow)
 
     Returns:
         loss: scalar loss tensor
         stats: dict with auxiliary metrics for logging
     """
     # ── Policy ratio ───────────────────────────────────────────────────
-    ratio = torch.exp(trainer_log_probs - inference_log_probs)  # (B*G, seq_len)
+    # Clamp log ratio to prevent exp() overflow/underflow
+    log_ratio = trainer_log_probs - inference_log_probs
+    log_ratio = torch.clamp(log_ratio, min=-max_log_ratio, max=max_log_ratio)
+    ratio = torch.exp(log_ratio)  # (B*G, seq_len)
 
     # ── Broadcast advantages to token level ────────────────────────────
     # advantages is (B*G,), we need (B*G, 1) to broadcast over seq_len
@@ -82,8 +87,10 @@ def grpo_loss(
     pg_loss = torch.max(pg_loss1, pg_loss2)  # (B*G, seq_len)
 
     # ── KL penalty (vs inference / old policy) ─────────────────────────
-    log_ratio = inference_log_probs - trainer_log_probs
-    kl = torch.exp(log_ratio) - log_ratio - 1.0  # (B*G, seq_len)
+    # Reuse clamped log_ratio for numerical stability
+    kl_log_ratio = inference_log_probs - trainer_log_probs
+    kl_log_ratio = torch.clamp(kl_log_ratio, min=-max_log_ratio, max=max_log_ratio)
+    kl = torch.exp(kl_log_ratio) - kl_log_ratio - 1.0  # (B*G, seq_len)
 
     # ── Combine and mask ───────────────────────────────────────────────
     per_token_loss = pg_loss + beta * kl                   # (B*G, seq_len)

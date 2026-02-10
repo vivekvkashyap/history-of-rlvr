@@ -217,136 +217,37 @@ class AsyncGRPOTrainer(Trainer):
         return model
 
     # ================================================================
-    #  Optimizer – use Muon for matrix params, AdamW for others
+    #  Optimizer – AdamW
     # ================================================================
 
     def create_optimizer(self):
         """
-        Create optimizer using Muon for 2D weight matrices and AdamW for
-        embeddings, heads, biases, and other non-2D parameters.
-        
-        Based on the MuonWithAuxAdam pattern from:
-        https://github.com/KellerJordan/modded-nanogpt
+        Create AdamW optimizer for all trainable parameters.
+
+        Uses adam_beta1, adam_beta2, learning_rate, and weight_decay from
+        the training config (AsyncGRPOConfig / TrainingArguments).
         """
-        from muon import SingleDeviceMuon
-        
         if self.optimizer is not None:
             return self.optimizer
 
         model = self.model_wrapped if hasattr(self, "model_wrapped") else self.model
-        
-        # Collect parameters by type
+
         # For PEFT/LoRA models, only optimize trainable parameters
         if is_peft_model(model):
-            all_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+            params = [p for p in model.parameters() if p.requires_grad]
         else:
-            all_params = [(n, p) for n, p in model.named_parameters()]
-        
-        # Separate parameters:
-        # - Muon: 2D parameters (weight matrices) not in embeddings/heads
-        # - AdamW: embeddings, heads, biases, layer norms, and other non-2D params
-        muon_params = []
-        adamw_params = []
-        
-        for name, param in all_params:
-            # Use AdamW for:
-            # - embeddings
-            # - output head (lm_head)
-            # - biases
-            # - layer norms
-            # - any non-2D parameters
-            if ("embed" in name or 
-                "lm_head" in name or
-                "bias" in name or
-                "norm" in name or
-                param.ndim < 2):
-                adamw_params.append(param)
-            else:
-                # Use Muon for 2D weight matrices in hidden layers
-                muon_params.append(param)
-        
-        logger.info(f"Optimizer: Muon ({len(muon_params)} params) + "
-                   f"AdamW ({len(adamw_params)} params)")
-        
-        # Create a combined optimizer using SingleDeviceMuon and AdamW
-        # We'll use a custom class that manages both optimizers
-        class SingleDeviceMuonWithAdamW(torch.optim.Optimizer):
-            """
-            Combined optimizer using SingleDeviceMuon for matrix params and AdamW for others.
-            Single-device version that doesn't require torch.distributed.
-            """
-            def __init__(self, muon_params, adamw_params, lr, weight_decay, momentum=0.95, 
-                        betas=(0.9, 0.999), eps=1e-8):
-                # Create sub-optimizers
-                self.muon_opt = SingleDeviceMuon(muon_params, lr=lr, weight_decay=weight_decay, 
-                                                 momentum=momentum) if muon_params else None
-                self.adamw_opt = torch.optim.AdamW(adamw_params, lr=lr, weight_decay=weight_decay,
-                                                   betas=betas, eps=eps) if adamw_params else None
-                
-                # Combine param groups for the parent class
-                all_param_groups = []
-                if self.muon_opt:
-                    all_param_groups.extend(self.muon_opt.param_groups)
-                if self.adamw_opt:
-                    all_param_groups.extend(self.adamw_opt.param_groups)
-                
-                # Initialize parent with dummy defaults
-                self.defaults = {}
-                self.param_groups = all_param_groups
-                # Combine states
-                self.state = {}
-                if self.muon_opt:
-                    self.state.update(self.muon_opt.state)
-                if self.adamw_opt:
-                    self.state.update(self.adamw_opt.state)
-            
-            @torch.no_grad()
-            def step(self, closure=None):
-                """Step both optimizers."""
-                loss = None
-                if closure is not None:
-                    with torch.enable_grad():
-                        loss = closure()
-                
-                if self.muon_opt:
-                    self.muon_opt.step()
-                if self.adamw_opt:
-                    self.adamw_opt.step()
-                
-                return loss
-            
-            def zero_grad(self, set_to_none=False):
-                """Zero gradients for both optimizers."""
-                if self.muon_opt:
-                    self.muon_opt.zero_grad(set_to_none=set_to_none)
-                if self.adamw_opt:
-                    self.adamw_opt.zero_grad(set_to_none=set_to_none)
-            
-            def state_dict(self):
-                """Combine state dicts from both optimizers."""
-                state_dict = {
-                    'muon': self.muon_opt.state_dict() if self.muon_opt else None,
-                    'adamw': self.adamw_opt.state_dict() if self.adamw_opt else None,
-                }
-                return state_dict
-            
-            def load_state_dict(self, state_dict):
-                """Load state dicts for both optimizers."""
-                if self.muon_opt and state_dict.get('muon'):
-                    self.muon_opt.load_state_dict(state_dict['muon'])
-                if self.adamw_opt and state_dict.get('adamw'):
-                    self.adamw_opt.load_state_dict(state_dict['adamw'])
-        
-        self.optimizer = SingleDeviceMuonWithAdamW(
-            muon_params=muon_params,
-            adamw_params=adamw_params,
+            params = list(model.parameters())
+
+        logger.info(f"Optimizer: AdamW ({len(params)} trainable params)")
+
+        self.optimizer = torch.optim.AdamW(
+            params,
             lr=self.args.learning_rate,
+            betas=(self.args.adam_beta1, self.args.adam_beta2),
+            eps=self.args.adam_epsilon,
             weight_decay=self.args.weight_decay,
-            momentum=0.95,
-            betas=(0.9, 0.999),
-            eps=1e-8
         )
-        
+
         return self.optimizer
 
     # ================================================================
@@ -540,6 +441,7 @@ class AsyncGRPOTrainer(Trainer):
             completion_mask=inputs["loss_mask"],
             epsilon=self.args.epsilon,
             beta=self.args.beta,
+            max_log_ratio=self.args.max_log_ratio,
         )
 
         if return_outputs:
@@ -618,8 +520,11 @@ class AsyncGRPOTrainer(Trainer):
         """
         inflight = self.args.inflight_weight_updates
 
+        # Only pause pool if we're about to sync weights (skip at step 0)
+        should_pause = self.args.continuous_batching and self.state.global_step > 0
+        
         # ── Pause continuous pool to eliminate worker contention ───────
-        if self.args.continuous_batching:
+        if should_pause:
             self.orchestrator.pause_pool()
             # Wait for in-flight generation to drain (max 10s)
             for _ in range(100):
@@ -635,14 +540,24 @@ class AsyncGRPOTrainer(Trainer):
 
         if not inflight:
             # Legacy mode: wait for generation to finish
+            # In continuous batching, pause the pool and wait for drainage
             waits = 0
-            while self.orchestrator.is_generating:
+            while self.orchestrator.is_generating or (
+                self.args.continuous_batching and self.orchestrator._pool_in_flight > 0
+            ):
                 time.sleep(0.5)
                 waits += 1
                 if waits % 10 == 0:
-                    logger.info(
-                        "Waiting for generation to finish before syncing..."
-                    )
+                    if self.log_router:
+                        self.log_router.log_inference(
+                            f"[yellow]Waiting for generation to finish before syncing "
+                            f"(is_generating={self.orchestrator.is_generating}, "
+                            f"pool_in_flight={self.orchestrator._pool_in_flight})[/yellow]"
+                        )
+                    else:
+                        logger.info(
+                            "Waiting for generation to finish before syncing..."
+                        )
 
         unwrapped = self.accelerator.unwrap_model(self.model)
 

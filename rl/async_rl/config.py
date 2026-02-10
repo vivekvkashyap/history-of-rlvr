@@ -37,23 +37,24 @@ class AsyncGRPOConfig(TrainingArguments):
     model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
 
     # ── Generation / Inference ─────────────────────────────────────────
-    num_generations: int = 16          # G – group size per prompt
+    num_generations: int = 16         # G – group size per prompt (increased for better advantage estimation)
     max_new_tokens: int = 512         # max tokens per completion
-    temperature: float = 0.7
+    temperature: float = 1.0          # higher temp for more exploration
     top_p: float = 0.95
 
     # ── GRPO objective ─────────────────────────────────────────────────
     epsilon: float = 0.2              # clipping range for policy ratio
-    beta: float = 0.04                # KL penalty coefficient
+    beta: float = 0.01                # KL penalty coefficient (lower = less restrictive)
+    max_log_ratio: float = 10.0       # clamp log ratios to prevent exp overflow (increased for stability)
 
     # ── Batch (number of *prompts* sampled per training step) ──────────
-    batch_size: int = 4
+    batch_size: int = 4               # increased for lower variance
 
     # ── LoRA / PEFT ────────────────────────────────────────────────────
-    use_lora: bool = False
-    lora_rank: int = 8
-    lora_alpha: int = 32
-    lora_dropout: float = 0.0
+    use_lora: bool = True
+    lora_rank: int = 16
+    lora_alpha: int = 64              # 4x rank for proper scaling
+    lora_dropout: float = 0.05
     lora_target_modules: Optional[List[str]] = None   # None → DEFAULT_LORA_TARGET_MODULES
     lora_modules_to_save: Optional[List[str]] = None
     lora_use_rslora: bool = False
@@ -63,7 +64,7 @@ class AsyncGRPOConfig(TrainingArguments):
     dataset_name: str = "openai/gsm8k"
     dataset_config: str = "main"
     dataset_split: str = "train"
-    max_prompt_length: int = 512
+    max_prompt_length: int = 256
 
     # ── vLLM server connection ─────────────────────────────────────────
     vllm_server_host: str = "0.0.0.0"
@@ -80,8 +81,8 @@ class AsyncGRPOConfig(TrainingArguments):
     pool_size: int = 16                   # number of concurrent prompt-generation slots
 
     # ── In-flight weight updates (PipelineRL-style) ───────────────────
-    inflight_weight_updates: bool = True  # push weights mid-generation
-    max_off_policy_steps: int = 8         # discard rollouts spanning more versions
+    inflight_weight_updates: bool = True  # disable for on-policy learning
+    max_off_policy_steps: int = 4          # strict on-policy (only used if inflight=True)
 
     # ── Evaluation / Display ───────────────────────────────────────────
     eval_display_steps: int = 10          # print examples every N steps
@@ -92,13 +93,16 @@ class AsyncGRPOConfig(TrainingArguments):
 
     # ── Override TrainingArguments defaults ─────────────────────────────
     output_dir: str = "outputs/async_grpo"
-    learning_rate: float = 1e-6
-    weight_decay: float = 0.01
-    max_grad_norm: float = 1.0
-    warmup_ratio: float = 0.03
+    learning_rate: float = 5e-6       # matches Will Brown's GRPO recipe
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.99
+    weight_decay: float = 0.1
+    max_grad_norm: float = 0.1        # tighter clipping for stability
+    warmup_ratio: float = 0.1         # longer warmup for stability
+    lr_scheduler_type: str = "cosine"
     max_steps: int = 500
     logging_steps: int = 1
-    save_steps: int = 50
+    save_steps: int = 100
     save_strategy: str = "steps"
     bf16: bool = True
     seed: int = 42
@@ -109,7 +113,7 @@ class AsyncGRPOConfig(TrainingArguments):
     gradient_checkpointing_kwargs: Optional[Dict] = field(
         default_factory=lambda: {"use_reentrant": False}
     )  # use_reentrant=False required for LoRA (frozen params)
-    report_to: str = "none"                # set to "wandb" to enable W&B
+    report_to: str = "wandb"                # W&B logging enabled
 
     def __post_init__(self):
         # ── Build LoRA config from individual fields ───────────────────
