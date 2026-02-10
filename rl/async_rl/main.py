@@ -1,5 +1,5 @@
 """
-Async GRPO RL Training – Main Entry Point.
+Async GRPO RL Training – Main Entry Point (backward-compatible, defaults to GSM8K).
 
 Thin script: create config, load model + tokenizer, connect to the
 vLLM inference server, create the async trainer, call trainer.train().
@@ -15,6 +15,10 @@ GPU layout (typical 2-GPU setup):
 For the full tmux experience, launch via:
     python -m async_rl.launch [args...]
 instead of calling this script directly.
+
+For environment-based training (recommended), use:
+    python -m environments.gsm8k --launch
+    python -m environments.gpqa --launch
 """
 
 import os

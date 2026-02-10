@@ -18,7 +18,7 @@ import sys
 import time
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from torch import nn
@@ -36,7 +36,6 @@ from rl.async_rl.config import AsyncGRPOConfig
 from rl.async_rl.client import VLLMClient
 from rl.async_rl.display import print_examples
 from rl.async_rl.orchestrator import Orchestrator, Batch
-from rl.sync_rl.data import GSM8KDataset
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +83,8 @@ class AsyncGRPOTrainer(Trainer):
         model: nn.Module,
         args: AsyncGRPOConfig,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
+        dataset: Any = None,
+        reward_fn: Optional[Callable[[List[str], List[str]], List[float]]] = None,
         log_router=None,
         **kwargs,
     ):
@@ -116,14 +117,28 @@ class AsyncGRPOTrainer(Trainer):
 
         self._trainer_device = torch.device(f"cuda:{args.trainer_gpu_id}")
 
-        # ── GSM8K dataset ──────────────────────────────────────────────
-        logger.info("Loading GSM8K dataset...")
-        self.gsm8k_dataset = GSM8KDataset(
-            split=args.dataset_split,
-            dataset_name=args.dataset_name,
-            dataset_config=args.dataset_config,
-        )
-        logger.info(f"  {len(self.gsm8k_dataset)} training examples loaded")
+        # ── Dataset (injected from environment or fallback to GSM8K) ────
+        if dataset is not None:
+            self.env_dataset = dataset
+        else:
+            # Backward compat: default to GSM8K if no dataset provided
+            from rl.sync_rl.data import GSM8KDataset
+            logger.info("No dataset provided, falling back to GSM8K...")
+            self.env_dataset = GSM8KDataset(
+                split=args.dataset_split,
+                dataset_name=args.dataset_name,
+                dataset_config=args.dataset_config,
+            )
+        logger.info(f"  {len(self.env_dataset)} training examples loaded")
+
+        # ── Reward function (injected from environment or fallback) ────
+        if reward_fn is not None:
+            self.reward_fn = reward_fn
+        else:
+            # Backward compat: default to GSM8K reward
+            from rl.sync_rl.reward import compute_rewards_batch
+            logger.info("No reward_fn provided, falling back to GSM8K rewards...")
+            self.reward_fn = compute_rewards_batch
 
         # ── vLLM client (NCCL weight sync) ─────────────────────────────
         host = args.vllm_server_host
@@ -152,7 +167,8 @@ class AsyncGRPOTrainer(Trainer):
             temperature=args.temperature,
             top_p=args.top_p,
             batch_size=args.batch_size,
-            dataset=self.gsm8k_dataset,
+            dataset=self.env_dataset,
+            reward_fn=self.reward_fn,
             tokenizer=self.processing_class,
             max_prompt_length=args.max_prompt_length,
             generation_timeout=args.generation_timeout,

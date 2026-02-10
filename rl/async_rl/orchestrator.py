@@ -26,7 +26,10 @@ Supports two weight-sync modes:
     exceeds ``max_off_policy_steps`` are discarded before training.
 
 Simplified from the verifiers-rl orchestrator: no Environment
-abstraction, no multi-step trajectories -- just single-turn GSM8K.
+abstraction, no multi-step trajectories -- just single-turn generation.
+
+The dataset and reward function are injected via constructor parameters,
+so the orchestrator is environment-agnostic.
 """
 
 import asyncio
@@ -38,7 +41,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 import torch
@@ -47,8 +50,6 @@ from openai import AsyncOpenAI
 # Parent dir for cross-package imports (history_of_rlvr/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 from rl.algorithms.grpo.grpo import compute_group_advantages
-from rl.sync_rl.data import GSM8KDataset
-from rl.sync_rl.reward import compute_rewards_batch
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,10 @@ class Orchestrator:
         top_p: float = 0.95,
         # ── Batch ──────────────────────────────────────────────────────
         batch_size: int = 4,
-        # ── Dataset ────────────────────────────────────────────────────
-        dataset: GSM8KDataset,
+        # ── Dataset (duck-typed: needs __len__ + __getitem__ → {"prompt", "ground_truth"})
+        dataset: Any = None,
+        # ── Reward function: (completions, ground_truths) → list[float]
+        reward_fn: Callable[[List[str], List[str]], List[float]] = None,
         # ── Tokenizer (for prompt tokenisation) ────────────────────────
         tokenizer: Any,
         max_prompt_length: int = 512,
@@ -166,6 +169,7 @@ class Orchestrator:
         self.top_p = top_p
         self.batch_size = batch_size
         self.dataset = dataset
+        self.reward_fn = reward_fn
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.generation_timeout = generation_timeout
@@ -495,10 +499,10 @@ class Orchestrator:
         Generate a full batch of completions via the vLLM server.
 
         Steps:
-          1. Sample batch_size prompts from GSM8K
+          1. Sample batch_size prompts from the dataset
           2. For each prompt, request num_generations completions
           2b. (In-flight mode) Filter off-policy prompts
-          3. Compute binary rewards (math answer verification)
+          3. Compute rewards via the injected reward function
           4. Compute GRPO group-relative advantages
           5. Tokenize & package into tensors for the trainer
         """
@@ -624,7 +628,7 @@ class Orchestrator:
 
         # ── 3. Compute rewards ─────────────────────────────────────────
         expanded_gts = [gt for gt in ground_truths for _ in range(G)]
-        rewards = compute_rewards_batch(all_completions, expanded_gts)
+        rewards = self.reward_fn(all_completions, expanded_gts)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
 
         # ── 4. GRPO group-relative advantages ──────────────────────────
@@ -877,7 +881,7 @@ class Orchestrator:
 
         # ── Compute rewards ───────────────────────────────────────────
         expanded_gts = [gt for gt in ground_truths for _ in range(G)]
-        rewards = compute_rewards_batch(all_completions, expanded_gts)
+        rewards = self.reward_fn(all_completions, expanded_gts)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
 
         # ── GRPO group-relative advantages ────────────────────────────
