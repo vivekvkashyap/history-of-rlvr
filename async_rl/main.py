@@ -59,7 +59,7 @@ def main():
     (config,) = parser.parse_args_into_dataclasses()
 
     console.print()
-    console.rule("[green]Async GRPO Training[/green]")
+    console.rule("Async GRPO Training")
     console.print()
     log(f"  Model    {config.model_name}")
     log(f"  GRPO     G={config.num_generations}  eps={config.epsilon}  beta={config.beta}")
@@ -68,6 +68,10 @@ def main():
     log(f"  GPU      trainer=cuda:{config.trainer_gpu_id}")
     if config.use_lora:
         log(f"  LoRA     rank={config.lora_rank}  alpha={config.lora_alpha}")
+    if config.inflight_weight_updates:
+        log(f"  Inflight ON  max_off_policy_steps={config.max_off_policy_steps}")
+    else:
+        log(f"  Inflight OFF (legacy blocking sync)")
     console.print()
 
     # ── Model + Tokenizer ──────────────────────────────────────────────

@@ -10,9 +10,13 @@ Communication with the main (trainer) thread uses two queues:
   - request_queue: trainer submits batch IDs to generate
   - result_queue:  worker delivers completed Batch objects
 
-The trainer can check ``orchestrator.is_generating`` to know whether
-a generation request is in flight (used to coordinate weight sync --
-we don't want to update weights while the server is mid-generation).
+Supports two weight-sync modes:
+  - Legacy (inflight_weight_updates=False): trainer waits for generation
+    to finish before syncing weights, using ``is_generating`` flag.
+  - In-flight (inflight_weight_updates=True, PipelineRL-style): weights
+    are pushed mid-generation.  Each prompt records the policy version at
+    the start and end of its generation.  Prompts whose version span
+    exceeds ``max_off_policy_steps`` are discarded before training.
 
 Simplified from the verifiers-rl orchestrator: no Environment
 abstraction, no multi-step trajectories -- just single-turn GSM8K.
@@ -54,6 +58,9 @@ class Batch:
 
     Contains everything the trainer needs to do a forward pass + loss
     computation, plus metadata for logging.
+
+    ``num_valid_prompts`` indicates how many prompts survived off-policy
+    filtering.  When 0, the trainer should skip the step.
     """
     batch_id: int
 
@@ -63,6 +70,11 @@ class Batch:
     loss_mask: torch.Tensor          # (B*G, L)   1 for completion tokens
     inference_logprobs: torch.Tensor # (B*G, L-1) vLLM logprobs aligned
     advantages: torch.Tensor         # (B*G,)     group-relative advantages
+
+    # ── Off-policy tracking ────────────────────────────────────────────
+    num_valid_prompts: int = -1      # prompts after filtering (-1 = no filtering)
+    policy_version_min: int = 0      # min policy version seen in this batch
+    policy_version_max: int = 0      # max policy version seen in this batch
 
     # ── Logging ────────────────────────────────────────────────────────
     generation_time: float = 0.0
@@ -116,6 +128,9 @@ class Orchestrator:
         max_prompt_length: int = 512,
         # ── Timeouts ──────────────────────────────────────────────────
         generation_timeout: float = 600.0,
+        # ── In-flight weight updates ──────────────────────────────────
+        inflight_weight_updates: bool = False,
+        max_off_policy_steps: int = 1,
         # ── Log router (optional) ─────────────────────────────────────
         log_router: Any = None,
     ):
@@ -132,6 +147,8 @@ class Orchestrator:
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.generation_timeout = generation_timeout
+        self.inflight_weight_updates = inflight_weight_updates
+        self.max_off_policy_steps = max_off_policy_steps
         self.log_router = log_router
 
         # Queues for thread communication
@@ -141,6 +158,11 @@ class Orchestrator:
 
         # State flag: True while a generation request is being processed
         self.is_generating = False
+
+        # Policy version counter – written by the trainer thread after
+        # each successful weight sync, read by the orchestrator thread.
+        # CPython GIL makes single-int read/write atomic across threads.
+        self.current_policy_version: int = 0
 
         # Thread management
         self.worker_thread: Optional[threading.Thread] = None
@@ -251,6 +273,7 @@ class Orchestrator:
         Steps:
           1. Sample batch_size prompts from GSM8K
           2. For each prompt, request num_generations completions
+          2b. (In-flight mode) Filter off-policy prompts
           3. Compute binary rewards (math answer verification)
           4. Compute GRPO group-relative advantages
           5. Tokenize & package into tensors for the trainer
@@ -277,10 +300,6 @@ class Orchestrator:
 
         # ── 2. Generate completions via OpenAI API ─────────────────────
         # We send each prompt as a separate request with n=G
-        all_completions: List[str] = []
-        all_token_ids: List[List[int]] = []
-        all_logprobs: List[List[float]] = []
-
         tasks = []
         for prompt in prompts:
             tasks.append(
@@ -289,7 +308,75 @@ class Orchestrator:
 
         results = await asyncio.gather(*tasks)
 
-        for comps, tok_ids, lps in results:
+        # ── 2b. Off-policy filtering (in-flight mode) ─────────────────
+        # Each result is (comps, tok_ids, lps, start_ver, end_ver).
+        # Keep only prompts whose policy-version span is acceptable.
+        all_start_versions: List[int] = []
+        all_end_versions: List[int] = []
+        for _, _, _, sv, ev in results:
+            all_start_versions.append(sv)
+            all_end_versions.append(ev)
+
+        if self.inflight_weight_updates:
+            valid_indices: List[int] = []
+            for i, (sv, ev) in enumerate(
+                zip(all_start_versions, all_end_versions)
+            ):
+                if ev - sv <= self.max_off_policy_steps:
+                    valid_indices.append(i)
+
+            num_discarded = B - len(valid_indices)
+
+            if num_discarded > 0 and self.log_router:
+                self.log_router.log_inference(
+                    f"[yellow]Discarded {num_discarded}/{B} prompts "
+                    f"(off-policy span > {self.max_off_policy_steps})[/yellow]"
+                )
+
+            if len(valid_indices) == 0:
+                # All prompts were too off-policy – return an empty batch
+                self.is_generating = False
+                ver_min = min(all_start_versions) if all_start_versions else 0
+                ver_max = max(all_end_versions) if all_end_versions else 0
+                t_gen = time.time() - t_start
+                if self.log_router:
+                    self.log_router.log_inference(
+                        f"[red]All {B} prompts discarded for batch "
+                        f"{batch_id} – returning empty batch[/red]"
+                    )
+                empty = torch.zeros(0)
+                return Batch(
+                    batch_id=batch_id,
+                    input_ids=empty, attention_mask=empty,
+                    loss_mask=empty, inference_logprobs=empty,
+                    advantages=empty,
+                    num_valid_prompts=0,
+                    policy_version_min=ver_min,
+                    policy_version_max=ver_max,
+                    generation_time=t_gen,
+                    metrics={
+                        "train/num_discarded_prompts": float(B),
+                        "train/generate_s": t_gen,
+                    },
+                )
+
+            # Re-index to keep only valid prompts
+            results = [results[i] for i in valid_indices]
+            prompts = [prompts[i] for i in valid_indices]
+            ground_truths = [ground_truths[i] for i in valid_indices]
+            all_start_versions = [all_start_versions[i] for i in valid_indices]
+            all_end_versions = [all_end_versions[i] for i in valid_indices]
+            B = len(prompts)
+        else:
+            num_discarded = 0
+            valid_indices = list(range(B))
+
+        # Flatten per-prompt results into flat lists
+        all_completions: List[str] = []
+        all_token_ids: List[List[int]] = []
+        all_logprobs: List[List[float]] = []
+
+        for comps, tok_ids, lps, _, _ in results:
             all_completions.extend(comps)
             all_token_ids.extend(tok_ids)
             all_logprobs.extend(lps)
@@ -327,6 +414,10 @@ class Orchestrator:
 
         self.is_generating = False
 
+        # ── Policy version range for logging ───────────────────────────
+        ver_min = min(all_start_versions) if all_start_versions else 0
+        ver_max = max(all_end_versions) if all_end_versions else 0
+
         # ── Metrics ────────────────────────────────────────────────────
         metrics = {
             "rewards/mean": rewards_tensor.mean().item(),
@@ -335,6 +426,9 @@ class Orchestrator:
             "train/completion_len_mean": avg_comp_len,
             "train/completion_len_max": max_comp_len,
             "train/generate_s": t_gen,
+            "train/num_discarded_prompts": float(num_discarded),
+            "train/policy_version_min": float(ver_min),
+            "train/policy_version_max": float(ver_max),
         }
 
         return Batch(
@@ -344,6 +438,9 @@ class Orchestrator:
             loss_mask=batch_tensors["loss_mask"],
             inference_logprobs=batch_tensors["inference_logprobs"],
             advantages=advantages,
+            num_valid_prompts=B,
+            policy_version_min=ver_min,
+            policy_version_max=ver_max,
             generation_time=t_gen,
             prompts=prompts,
             completions=all_completions,
@@ -360,9 +457,13 @@ class Orchestrator:
         Generate n completions for a single prompt using the OpenAI API.
 
         Returns:
-            (completions, token_ids, logprobs) for the n completions
+            (completions, token_ids, logprobs, start_version, end_version)
+            where start/end_version track which policy versions were active
+            at the start and end of the vLLM generation call.
         """
         assert self.client is not None
+
+        start_version = self.current_policy_version
 
         response = await self.client.completions.create(
             model=self.model_name,
@@ -375,6 +476,8 @@ class Orchestrator:
             logprobs=1,
             extra_body={"skip_special_tokens": False},
         )
+
+        end_version = self.current_policy_version
 
         completions: List[str] = []
         token_ids_list: List[List[int]] = []
@@ -416,7 +519,7 @@ class Orchestrator:
             token_ids_list.append(tok_ids)
             logprobs_list.append(lps)
 
-        return completions, token_ids_list, logprobs_list
+        return completions, token_ids_list, logprobs_list, start_version, end_version
 
     # ════════════════════════════════════════════════════════════════════
     #  Tensor preparation (mirrors sync_rl trainer._prepare_grpo_inputs)

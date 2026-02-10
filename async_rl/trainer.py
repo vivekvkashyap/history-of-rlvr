@@ -155,11 +155,18 @@ class AsyncGRPOTrainer(Trainer):
             tokenizer=self.processing_class,
             max_prompt_length=args.max_prompt_length,
             generation_timeout=args.generation_timeout,
+            inflight_weight_updates=args.inflight_weight_updates,
+            max_off_policy_steps=args.max_off_policy_steps,
             log_router=log_router,
         )
         self.orchestrator.start()
         self.orchestrator.submit_batch(0)  # kick off first batch
         logger.info("Orchestrator started, first batch submitted")
+        if args.inflight_weight_updates:
+            logger.info(
+                f"In-flight weight updates ENABLED "
+                f"(max_off_policy_steps={args.max_off_policy_steps})"
+            )
 
         # ── Metric accumulator ─────────────────────────────────────────
         self._grpo_metrics: Dict[str, list] = defaultdict(list)
@@ -220,6 +227,7 @@ class AsyncGRPOTrainer(Trainer):
         1. Sync updated weights to vLLM server (skip first step)
         2. Submit next batch for generation (pipeline)
         3. Get current batch from orchestrator (blocks if not ready)
+           3b. If batch is empty (all prompts discarded), skip step
         4. Single forward pass -> trainer log probs (with gradients)
         5. GRPO loss (clipped surrogate + KL penalty)
         6. accelerator.backward(loss)
@@ -236,6 +244,29 @@ class AsyncGRPOTrainer(Trainer):
 
         # ── 3. Get current batch ───────────────────────────────────────
         batch: Batch = self.orchestrator.get_batch(self.state.global_step)
+
+        # ── 3b. Handle empty batch (all prompts off-policy) ────────────
+        if batch.num_valid_prompts == 0:
+            msg = (
+                f"step {self.state.global_step}: all prompts discarded "
+                f"(off-policy v{batch.policy_version_min}->"
+                f"v{batch.policy_version_max}) – skipping"
+            )
+            logger.warning(msg)
+            if self.log_router:
+                self.log_router.log_trainer(f"[yellow]{msg}[/yellow]")
+
+            # Record the discard metrics even for skipped steps
+            for key, value in batch.metrics.items():
+                self._grpo_metrics[key].append(value)
+            self._grpo_metrics["train/sync_s"].append(t_sync)
+            self._grpo_metrics["train/skipped_step"].append(1.0)
+
+            # Return zero loss (no gradients to accumulate)
+            zero_loss = torch.tensor(0.0, device=self.accelerator.device)
+            zero_loss.requires_grad_(True)
+            self.accelerator.backward(zero_loss)
+            return zero_loss.detach()
 
         model.train()
         device = self.accelerator.device
@@ -277,6 +308,7 @@ class AsyncGRPOTrainer(Trainer):
 
         stats["train/sync_s"] = t_sync
         stats["train/train_s"] = t_train
+        stats["train/skipped_step"] = 0.0
         stats["train/masked_fraction"] = 1.0 - (
             loss_mask_shifted.sum() / loss_mask_shifted.numel()
         ).item()
@@ -295,11 +327,22 @@ class AsyncGRPOTrainer(Trainer):
         if self.log_router:
             reward_mean = batch.metrics.get('rewards/mean', 0)
             total_steps = self.args.max_steps
+            ver_info = (
+                f" | v{batch.policy_version_min}-"
+                f"v{batch.policy_version_max}"
+            ) if self.args.inflight_weight_updates else ""
+            discard_info = ""
+            n_disc = batch.metrics.get("train/num_discarded_prompts", 0)
+            if n_disc > 0:
+                discard_info = (
+                    f" | [yellow]disc {int(n_disc)}[/yellow]"
+                )
             self._pending_trainer_line = (
                 f"[bold white]step {self.state.global_step}/{total_steps}"
                 f"[/bold white] | "
                 f"loss [bright_yellow]{loss.item():.4f}[/bright_yellow] | "
                 f"reward [bright_green]{reward_mean:.3f}[/bright_green]"
+                f"{ver_info}{discard_info}"
             )
 
         # ── Console summary (fallback) ─────────────────────────────────
@@ -398,27 +441,39 @@ class AsyncGRPOTrainer(Trainer):
         """
         Push updated policy weights to the vLLM server via NCCL.
 
-        Waits for any in-flight generation to finish first (we don't
-        want to update weights while the server is mid-generation).
+        Two modes:
+          - Legacy (inflight_weight_updates=False): waits for any in-flight
+            generation to finish before pushing weights.
+          - In-flight (inflight_weight_updates=True, PipelineRL-style):
+            pushes weights immediately -- vLLM briefly pauses its workers
+            to receive each parameter via NCCL, then resumes generation.
+            After sync, increments ``orchestrator.current_policy_version``
+            so the orchestrator can track per-prompt off-policyness.
 
         For PEFT/LoRA models the adapters are temporarily merged into
         the base weights so vLLM receives a standard state dict.
         """
-        # Wait for generation to finish
-        waits = 0
-        while self.orchestrator.is_generating:
-            time.sleep(0.5)
-            waits += 1
-            if waits % 10 == 0:
-                logger.info(
-                    "Waiting for generation to finish before syncing..."
-                )
+        inflight = self.args.inflight_weight_updates
+
+        if not inflight:
+            # Legacy mode: wait for generation to finish
+            waits = 0
+            while self.orchestrator.is_generating:
+                time.sleep(0.5)
+                waits += 1
+                if waits % 10 == 0:
+                    logger.info(
+                        "Waiting for generation to finish before syncing..."
+                    )
 
         unwrapped = self.accelerator.unwrap_model(self.model)
 
+        ver = self.orchestrator.current_policy_version
         if self.log_router:
+            mode_tag = "in-flight" if inflight else "blocking"
             self.log_router.log_inference(
-                "[cyan]Starting weight sync to vLLM server...[/cyan]"
+                f"[cyan]Starting weight sync to vLLM server "
+                f"({mode_tag}, v{ver} -> v{ver + 1})...[/cyan]"
             )
 
         if is_peft_model(unwrapped):
@@ -462,6 +517,15 @@ class AsyncGRPOTrainer(Trainer):
         self.vllm_client.reset_prefix_cache()
         while self.vllm_client.get_num_background_tasks() > 0:
             time.sleep(0.5)
+
+        # Bump the policy version so the orchestrator knows new weights
+        # are live.  This is a simple int write, atomic under CPython GIL.
+        self.orchestrator.current_policy_version += 1
+        if self.log_router:
+            self.log_router.log_inference(
+                f"[cyan]Policy version -> "
+                f"{self.orchestrator.current_policy_version}[/cyan]"
+            )
 
     # ================================================================
     #  Training loop cleanup

@@ -75,6 +75,10 @@ class AsyncGRPOConfig(TrainingArguments):
     generation_timeout: float = 600.0     # max seconds to wait for a batch
     max_concurrent: int = 100             # max concurrent HTTP connections to vLLM
 
+    # ── In-flight weight updates (PipelineRL-style) ───────────────────
+    inflight_weight_updates: bool = True  # push weights mid-generation
+    max_off_policy_steps: int = 1         # discard rollouts spanning more versions
+
     # ── Device placement ───────────────────────────────────────────────
     trainer_gpu_id: int = 0               # GPU for training model
 
