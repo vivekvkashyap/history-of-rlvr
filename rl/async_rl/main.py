@@ -17,8 +17,8 @@ For the full tmux experience, launch via:
 instead of calling this script directly.
 
 For environment-based training (recommended), use:
-    python -m environments.gsm8k --launch
-    python -m environments.gpqa --launch
+    python -m environments.gsm8k_rl --launch
+    python -m environments.gpqa_rl --launch
 """
 
 import os
@@ -66,7 +66,7 @@ def main():
     console.rule("Async GRPO Training")
     console.print()
     log(f"  Model    {config.model_name}")
-    log(f"  GRPO     G={config.num_generations}  eps={config.epsilon}  beta={config.beta}")
+    log(f"  GRPO     G={config.num_generations}  eps_lo={config.epsilon_lower}  eps_hi={config.epsilon_upper}  beta={config.beta}")
     log(f"  Train    lr={config.learning_rate}  steps={config.max_steps}  batch={config.batch_size}  micro={config.micro_batch_size}")
     log(f"  Server   {config.vllm_server_host}:{config.vllm_server_port}")
     log(f"  GPU      trainer=cuda:{config.trainer_gpu_id}")

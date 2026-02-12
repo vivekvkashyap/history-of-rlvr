@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from torch.utils.data import Dataset
 
@@ -45,6 +45,10 @@ class Environment(abc.ABC):
 
     system_prompt: str = ""
     """System prompt prepended to every user question."""
+
+    def __init__(self):
+        """Initialize the environment. Tokenizer will be set later."""
+        self.tokenizer = None
 
     # ── Dataset ────────────────────────────────────────────────────────
 
@@ -81,20 +85,88 @@ class Environment(abc.ABC):
         """
         ...
 
+    # ── Evaluation helpers ────────────────────────────────────────────
+
+    def get_eval_dataset(self) -> List[Dict[str, str]]:
+        """
+        Load the evaluation dataset.
+
+        Override this to return a held-out test set. Default returns the
+        same data as ``get_dataset()`` (which is the training set).
+        """
+        return self.get_dataset()
+
+    def compute_reward_details(
+        self,
+        completion: str,
+        ground_truth: str,
+    ) -> Dict[str, Any]:
+        """
+        Return per-component reward breakdown for a single completion.
+
+        Override this in subclasses to provide detailed diagnostics
+        (e.g. correctness, format compliance, etc.).
+
+        Default: returns only the total reward.
+        """
+        total = self.compute_rewards([completion], [ground_truth])[0]
+        return {"total": total}
+
+    # ── Config overrides ─────────────────────────────────────────────
+
+    def get_config_overrides(self) -> Dict[str, Any]:
+        """
+        Return config overrides for this environment.
+
+        Override this method to customize training parameters per
+        environment so you don't need to pass them via CLI every time.
+
+        Keys must match ``AsyncGRPOConfig`` field names.
+        CLI arguments still take highest precedence.
+
+        Example::
+
+            def get_config_overrides(self):
+                return {
+                    "learning_rate": 1e-5,
+                    "max_steps": 1000,
+                    "num_generations": 8,
+                }
+        """
+        return {}
+
     # ── Prompt formatting helper ──────────────────────────────────────
+
+    def set_tokenizer(self, tokenizer):
+        """Set the tokenizer for proper chat template formatting."""
+        self.tokenizer = tokenizer
 
     def format_prompt(self, question: str) -> str:
         """
-        Build a ChatML-style prompt from a raw question string.
+        Build a prompt from a raw question string.
 
-        Uses ``self.system_prompt`` as the system message.  Override this
-        method if your environment needs a different prompt format.
+        If a tokenizer is set, uses its chat template via apply_chat_template().
+        Otherwise, falls back to ChatML format.
         """
-        return (
-            f"<|im_start|>system\n{self.system_prompt}<|im_end|>\n"
-            f"<|im_start|>user\n{question}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
-        )
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": question},
+        ]
+
+        if self.tokenizer is not None:
+            # Use the model's native chat template
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            # Fallback to ChatML format
+            return (
+                f"<|im_start|>system\n{self.system_prompt}<|im_end|>\n"
+                f"<|im_start|>user\n{question}<|im_end|>\n"
+                f"<|im_start|>assistant\n"
+            )
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -188,19 +260,50 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     console = Console(force_terminal=True, highlight=False)
 
     # ── Parse config ──────────────────────────────────────────────────
-    # Inject cli_args so HfArgumentParser picks them up
+    # 1. Collect environment-level config overrides
+    env_overrides = env.get_config_overrides()
+
+    # 2. Convert env overrides to CLI-style args, but only for keys
+    #    that are NOT already explicitly set in cli_args.  This way
+    #    CLI arguments always take highest precedence.
+    cli_keys = set()
+    for a in cli_args:
+        if a.startswith("--"):
+            cli_keys.add(a.lstrip("-"))
+
+    override_args: List[str] = []
+    for key, value in env_overrides.items():
+        if key not in cli_keys:
+            if isinstance(value, bool):
+                override_args += [f"--{key}", str(value).lower()]
+            else:
+                override_args += [f"--{key}", str(value)]
+
+    # 3. Parse: env overrides first, then cli_args (later values win)
     old_argv = sys.argv
-    sys.argv = ["env_runner"] + cli_args
+    sys.argv = ["env_runner"] + override_args + cli_args
     parser = HfArgumentParser(AsyncGRPOConfig)
     (config,) = parser.parse_args_into_dataclasses()
     sys.argv = old_argv
 
+    # 4. Log applied overrides
+    if env_overrides:
+        console.print()
+        console.print(f"  [bold cyan]Environment config overrides ({env.name}):[/bold cyan]")
+        for key, value in env_overrides.items():
+            tag = "[dim](overridden by CLI)[/dim]" if key in cli_keys else ""
+            console.print(f"    {key} = {value}  {tag}")
+
+    algo_name = config.algorithm.upper()
     console.print()
-    console.rule(f"{env.name} – Async GRPO Training")
+    console.rule(f"{env.name} – Async {algo_name} Training")
     console.print()
     console.print(f"  Environment  {env.name}")
     console.print(f"  Model        {config.model_name}")
-    console.print(f"  GRPO         G={config.num_generations}  eps={config.epsilon}  beta={config.beta}")
+    if config.algorithm == "cispo":
+        console.print(f"  CISPO        G={config.num_generations}  eps_high={config.cispo_epsilon_high}  eps_low={config.cispo_epsilon_low}")
+    else:
+        console.print(f"  GRPO         G={config.num_generations}  eps_lo={config.epsilon_lower}  eps_hi={config.epsilon_upper}  beta={config.beta}")
     console.print(f"  Train        lr={config.learning_rate}  steps={config.max_steps}  batch={config.batch_size}  micro={config.micro_batch_size}")
     console.print(f"  Server       {config.vllm_server_host}:{config.vllm_server_port}")
     console.print(f"  GPU          trainer=cuda:{config.trainer_gpu_id}")
@@ -217,9 +320,21 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     console.print()
 
     # ── Build dataset ─────────────────────────────────────────────────
-    console.print(f"Loading {env.name} dataset...")
-    dataset = EnvironmentDataset(env.get_dataset())
-    console.print(f"{len(dataset)} examples loaded.")
+    console.print(f"Loading {env.name} dataset (initial load without tokenizer)...")
+    # Initial load to get dataset size
+    temp_data = env.get_dataset()
+    console.print(f"{len(temp_data)} training examples found.")
+
+    # ── Build eval dataset ────────────────────────────────────────────
+    eval_data_raw = None
+    if config.eval_steps > 0:
+        console.print(f"Loading {env.name} eval dataset (split={config.eval_split})...")
+        try:
+            eval_data_raw = env.get_eval_dataset()
+            console.print(f"{len(eval_data_raw)} eval examples found.")
+        except Exception as e:
+            console.print(f"[yellow]Warning: could not load eval dataset: {e}[/yellow]")
+            console.print("[yellow]Evaluation will be disabled.[/yellow]")
 
     # ── Model + Tokenizer ─────────────────────────────────────────────
     console.print("Loading model and tokenizer...")
@@ -228,6 +343,16 @@ def _train(env: Environment, cli_args: List[str]) -> None:
         trust_remote_code=True,
         padding_side="right",
     )
+    
+    # ── Set tokenizer in environment and reload datasets ──────────────
+    console.print("Setting tokenizer and formatting prompts with model's chat template...")
+    env.set_tokenizer(tokenizer)
+    
+    # Reload datasets with proper formatting
+    dataset = EnvironmentDataset(env.get_dataset())
+    eval_dataset = eval_data_raw if eval_data_raw is None else env.get_eval_dataset()
+    console.print(f"Dataset formatted with {config.model_name} chat template.")
+    
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         dtype=torch.bfloat16,
@@ -258,6 +383,8 @@ def _train(env: Environment, cli_args: List[str]) -> None:
         processing_class=tokenizer,
         dataset=dataset,
         reward_fn=env.compute_rewards,
+        eval_dataset=eval_dataset,
+        reward_details_fn=env.compute_reward_details,
         log_router=log_router,
     )
     console.print("Trainer ready. Starting training...")
@@ -417,9 +544,10 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
             f"--host {vllm_host} "
             f"--port {vllm_port} "
             f"--tensor-parallel-size 1 "
-            f"--gpu-memory-utilization 0.5 "
+            f"--gpu-memory-utilization 0.9 "
             f"--dtype bfloat16 "
             f"--max-model-len 1536 "
+            # f"--max-num-seqs 512 "
             f"--enforce-eager "
             f"--disable-log-stats\n"
         )

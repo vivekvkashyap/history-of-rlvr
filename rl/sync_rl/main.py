@@ -41,7 +41,7 @@ def main():
     parser = HfArgumentParser(GRPOConfig)
     (config,) = parser.parse_args_into_dataclasses()
     logger.info(f"Model:  {config.model_name}")
-    logger.info(f"GRPO:   G={config.num_generations}, eps={config.epsilon}, "
+    logger.info(f"GRPO:   G={config.num_generations}, eps_lo={config.epsilon_lower}, eps_hi={config.epsilon_upper}, "
                 f"beta={config.beta}")
     logger.info(f"Train:  lr={config.learning_rate}, max_steps={config.max_steps}, "
                 f"batch_size={config.batch_size}")

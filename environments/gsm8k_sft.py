@@ -68,6 +68,7 @@ class GSM8K_SFT(Environment):
         dataset_name: str = "openai/gsm8k",
         dataset_config: str = "main",
     ):
+        super().__init__()
         self.split = split
         self.dataset_name = dataset_name
         self.dataset_config = dataset_config

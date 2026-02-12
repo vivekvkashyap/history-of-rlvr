@@ -636,6 +636,11 @@ class Orchestrator:
         # ── 4. GRPO group-relative advantages ──────────────────────────
         advantages = compute_group_advantages(rewards_tensor, G)
 
+        # ── 4b. Zero-variance group fraction ─────────────────────────
+        grouped_rewards = rewards_tensor.view(-1, G)
+        group_std = grouped_rewards.std(dim=1)
+        zero_var_frac = (group_std == 0).float().mean().item()
+
         # ── 5. Tokenize & build tensors ────────────────────────────────
         expanded_prompts = [p for p in prompts for _ in range(G)]
         batch_tensors = self._prepare_tensors(
@@ -653,6 +658,7 @@ class Orchestrator:
             "rewards/mean": rewards_tensor.mean().item(),
             "rewards/std": rewards_tensor.std().item(),
             "rewards/advantage_mean": advantages.mean().item(),
+            "rewards/zero_var_group_frac": zero_var_frac,
             "train/completion_len_mean": avg_comp_len,
             "train/completion_len_max": max_comp_len,
             "train/generate_s": t_gen,
@@ -889,6 +895,11 @@ class Orchestrator:
         # ── GRPO group-relative advantages ────────────────────────────
         advantages = compute_group_advantages(rewards_tensor, G)
 
+        # ── Zero-variance group fraction ──────────────────────────────
+        grouped_rewards = rewards_tensor.view(-1, G)
+        group_std = grouped_rewards.std(dim=1)
+        zero_var_frac = (group_std == 0).float().mean().item()
+
         # ── Tokenize & build tensors ──────────────────────────────────
         expanded_prompts = [p for p in prompts for _ in range(G)]
         batch_tensors = self._prepare_tensors(
@@ -904,6 +915,7 @@ class Orchestrator:
             "rewards/mean": rewards_tensor.mean().item(),
             "rewards/std": rewards_tensor.std().item(),
             "rewards/advantage_mean": advantages.mean().item(),
+            "rewards/zero_var_group_frac": zero_var_frac,
             "train/completion_len_mean": avg_comp_len,
             "train/completion_len_max": max_comp_len,
             "train/generate_s": t_gen,

@@ -22,7 +22,7 @@ Usage:
 
 import random
 import re
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from datasets import load_dataset
 
@@ -48,7 +48,7 @@ class GPQA(Environment):
     Reward: binary 1.0 if extracted answer letter matches correct answer.
     """
 
-    name = "gpqa"
+    name = "gpqa_rl"
 
     system_prompt = (
         "You are an expert scientist. Answer the following multiple-choice "
@@ -64,11 +64,32 @@ class GPQA(Environment):
         shuffle_choices: bool = True,
         seed: int = 42,
     ):
+        super().__init__()
         self.split = split
         self.dataset_name = dataset_name
         self.dataset_config = dataset_config
         self.shuffle_choices = shuffle_choices
         self.seed = seed
+
+    # ── Config overrides ──────────────────────────────────────────────
+
+    def get_config_overrides(self) -> Dict[str, Any]:
+        """
+        GPQA-specific training config defaults.
+
+        These are applied automatically so you don't need to pass them
+        via CLI every time.  CLI arguments still take precedence.
+        """
+        return {
+            # Customize these defaults for GPQA training:
+            # "model_name": "Qwen/Qwen2.5-0.5B-Instruct",
+            # "learning_rate": 1e-5,
+            # "max_steps": 500,
+            # "num_generations": 16,
+            # "batch_size": 512,
+            # "max_new_tokens": 2048,
+            # "temperature": 0.7,
+        }
 
     # ── Dataset ────────────────────────────────────────────────────────
 
@@ -138,6 +159,26 @@ class GPQA(Environment):
             self._compute_single_reward(comp, gt)
             for comp, gt in zip(completions, ground_truths)
         ]
+
+    # ── Evaluation ──────────────────────────────────────────────────────
+
+    def get_eval_dataset(self) -> List[Dict[str, str]]:
+        """Load GPQA test split for evaluation (re-uses train split since GPQA is small)."""
+        # GPQA Diamond only has a 'train' split; use it for eval with a seed-based subsample
+        return self.get_dataset()
+
+    @classmethod
+    def compute_reward_details(
+        cls, completion: str, ground_truth: str,
+    ) -> Dict[str, Any]:
+        """Per-component reward breakdown for a single completion."""
+        predicted = cls._extract_answer_letter(completion)
+        correct = predicted == ground_truth.upper()
+        return {
+            "correctness": 1.0 if correct else 0.0,
+            "total": 1.0 if correct else 0.0,
+            "extracted_answer": predicted,
+        }
 
     # ── Private helpers ────────────────────────────────────────────────
 

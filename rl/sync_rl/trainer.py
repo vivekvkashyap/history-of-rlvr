@@ -372,7 +372,8 @@ class GRPOTrainer(Trainer):
             inference_log_probs=inputs["inference_logprobs"],
             advantages=inputs["advantages"],
             completion_mask=inputs["loss_mask"],
-            epsilon=self.args.epsilon,
+            epsilon_lower=self.args.epsilon_lower,
+            epsilon_upper=self.args.epsilon_upper,
             beta=self.args.beta,
         )
 

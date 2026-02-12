@@ -42,7 +42,8 @@ class GRPOConfig(TrainingArguments):
     top_p: float = 0.95
 
     # ── GRPO objective ─────────────────────────────────────────────────
-    epsilon: float = 0.2              # clipping range for policy ratio
+    epsilon_lower: float = 0.2        # lower clip bound: ratio >= 1 - epsilon_lower
+    epsilon_upper: float = 0.2        # upper clip bound: ratio <= 1 + epsilon_upper
     beta: float = 0.04                # KL penalty coefficient
 
     # ── Batch (number of *prompts* sampled per training step) ──────────

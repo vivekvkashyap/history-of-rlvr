@@ -21,6 +21,7 @@ from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from accelerate.utils import is_peft_model
@@ -31,10 +32,12 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 # Parent dir for cross-package imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 from rl.algorithms.grpo.grpo import grpo_loss
+from rl.algorithms.cispo.cispo import cispo_loss
 
 from rl.async_rl.config import AsyncGRPOConfig
 from rl.async_rl.client import VLLMClient
 from rl.async_rl.display import print_examples
+from rl.async_rl.evaluator import Evaluator
 from rl.async_rl.orchestrator import Orchestrator, Batch
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,45 @@ def selective_log_softmax(
     return torch.stack(per_token_logps)
 
 
+def entropy_from_logits(logits: torch.Tensor, chunk_size: int = 128) -> torch.Tensor:
+    """
+    Compute the Shannon entropy (in nats) for each row of *logits* in a
+    memory-efficient way.
+
+    Instead of materializing the full softmax for all rows at once, the
+    logits are flattened to shape (N, num_classes), where N is the product
+    of all leading dimensions. Computation is then performed in chunks of
+    size ``chunk_size`` along this flattened dimension, reducing peak
+    memory usage. The result is reshaped back to match the input's leading
+    dimensions.
+
+    Args:
+        logits: Logits tensor of shape ``(..., num_classes)``. Entropy is
+            taken along the last axis; all leading dimensions are preserved
+            in the output.
+        chunk_size: Number of rows from the flattened logits to process per
+            iteration. Smaller values reduce memory usage at the cost of
+            more iterations.
+
+    Returns:
+        Entropy values with shape ``logits.shape[:-1]``.
+    """
+    original_shape = logits.shape[:-1]  # all dims except num_classes
+    num_classes = logits.shape[-1]
+
+    # Flatten all leading dimensions into one
+    flat_logits = logits.reshape(-1, num_classes)
+
+    entropies = []
+    for chunk in flat_logits.split(chunk_size, dim=0):
+        logps = F.log_softmax(chunk, dim=-1)
+        chunk_entropy = -(torch.exp(logps) * logps).sum(-1)
+        entropies.append(chunk_entropy)
+
+    entropies = torch.cat(entropies, dim=0)
+    return entropies.reshape(original_shape)
+
+
 # ── Trainer ────────────────────────────────────────────────────────────
 
 
@@ -85,6 +127,8 @@ class AsyncGRPOTrainer(Trainer):
         processing_class: Optional[PreTrainedTokenizerBase] = None,
         dataset: Any = None,
         reward_fn: Optional[Callable[[List[str], List[str]], List[float]]] = None,
+        eval_dataset: Any = None,
+        reward_details_fn: Optional[Callable] = None,
         log_router=None,
         **kwargs,
     ):
@@ -192,6 +236,34 @@ class AsyncGRPOTrainer(Trainer):
                 f"In-flight weight updates ENABLED "
                 f"(max_off_policy_steps={args.max_off_policy_steps})"
             )
+
+        # ── Evaluator (periodic eval on held-out test set) ──────────────
+        if args.eval_steps > 0 and eval_dataset is not None and len(eval_dataset) > 0:
+            eval_output_dir = os.path.join(args.output_dir, "evals")
+            self.evaluator = Evaluator(
+                server_base_url=vllm_base_url,
+                model_name=args.model_name,
+                eval_dataset=eval_dataset,
+                reward_details_fn=reward_details_fn or (
+                    lambda c, g: {"total": self.reward_fn([c], [g])[0]}
+                ),
+                num_problems=args.eval_num_problems,
+                temperature=args.eval_temperature,
+                max_new_tokens=args.eval_max_new_tokens,
+                output_dir=eval_output_dir,
+                log_router=log_router,
+            )
+            logger.info(
+                f"Evaluator enabled: every {args.eval_steps} steps, "
+                f"{args.eval_num_problems} problems, saved to {eval_output_dir}"
+            )
+        else:
+            self.evaluator = None
+            if args.eval_steps > 0:
+                logger.warning(
+                    "eval_steps > 0 but no eval_dataset provided – "
+                    "evaluation disabled"
+                )
 
         # ── Metric accumulator ─────────────────────────────────────────
         self._grpo_metrics: Dict[str, list] = defaultdict(list)
@@ -350,16 +422,25 @@ class AsyncGRPOTrainer(Trainer):
         accumulated_stats: Dict[str, float] = defaultdict(float)
         total_masked_tokens = 0
         total_mask_elements = 0
+        total_entropy_sum = 0.0
+        total_entropy_tokens = 0
 
         for i in range(num_micro):
             s = i * micro_bs
             e = min(s + micro_bs, total_seqs)
             mb_size = e - s
 
-            mb_logprobs = self._get_logprobs(
+            mb_logprobs, mb_entropies = self._get_logprobs(
                 model, input_ids[s:e], attention_mask[s:e],
             )
             mb_loss_mask = loss_mask[s:e, 1:]
+
+            # Accumulate masked entropy for logging
+            with torch.no_grad():
+                masked_ent = (mb_entropies * mb_loss_mask).sum().item()
+                ent_tokens = mb_loss_mask.sum().item()
+                total_entropy_sum += masked_ent
+                total_entropy_tokens += ent_tokens
 
             with self.compute_loss_context_manager():
                 mb_loss, mb_stats = self.compute_loss(
@@ -386,12 +467,18 @@ class AsyncGRPOTrainer(Trainer):
             total_mask_elements += mb_loss_mask.numel()
 
             # Free memory between micro-batches
-            del mb_logprobs, mb_loss
+            del mb_logprobs, mb_entropies, mb_loss
             torch.cuda.empty_cache()
 
         loss = total_loss
         stats = dict(accumulated_stats)
         t_train = time.time() - t0
+
+        # ── Compute mean entropy over completion tokens ─────────────────
+        mean_entropy = (
+            total_entropy_sum / max(total_entropy_tokens, 1)
+        )
+        stats["train/entropy"] = mean_entropy
 
         # ── Accumulate GRPO metrics ────────────────────────────────────
         for key, value in batch.metrics.items():
@@ -432,7 +519,8 @@ class AsyncGRPOTrainer(Trainer):
                 f"[bold white]step {self.state.global_step}/{total_steps}"
                 f"[/bold white] | "
                 f"loss [bright_yellow]{loss.item():.4f}[/bright_yellow] | "
-                f"reward [bright_green]{reward_mean:.3f}[/bright_green]"
+                f"reward [bright_green]{reward_mean:.3f}[/bright_green] | "
+                f"ent [bright_blue]{mean_entropy:.3f}[/bright_blue]"
                 f"{ver_info}{discard_info}"
             )
 
@@ -442,6 +530,7 @@ class AsyncGRPOTrainer(Trainer):
                 f"step {self.state.global_step} | "
                 f"loss={loss.item():.4f} | "
                 f"reward={batch.metrics.get('rewards/mean', 0):.3f} | "
+                f"entropy={mean_entropy:.3f} | "
                 f"kl={stats.get('loss/kl', 0):.4f} | "
                 f"gen={batch.generation_time:.1f}s | "
                 f"train={t_train:.1f}s | sync={t_sync:.1f}s"
@@ -462,19 +551,31 @@ class AsyncGRPOTrainer(Trainer):
         num_items_in_batch: Any = None,
     ):
         """
-        Compute the GRPO loss (clipped surrogate + KL penalty).
+        Compute the RL loss (GRPO or CISPO depending on config).
 
-        Delegates to the standalone ``grpo_loss`` from ``rl/grpo.py``.
+        Delegates to the standalone loss function from ``rl/algorithms/``.
         """
-        loss, stats = grpo_loss(
-            trainer_log_probs=inputs["trainer_logprobs"],
-            inference_log_probs=inputs["inference_logprobs"],
-            advantages=inputs["advantages"],
-            completion_mask=inputs["loss_mask"],
-            epsilon=self.args.epsilon,
-            beta=self.args.beta,
-            max_log_ratio=self.args.max_log_ratio,
-        )
+        if self.args.algorithm == "cispo":
+            loss, stats = cispo_loss(
+                trainer_log_probs=inputs["trainer_logprobs"],
+                inference_log_probs=inputs["inference_logprobs"],
+                advantages=inputs["advantages"],
+                completion_mask=inputs["loss_mask"],
+                epsilon_lower=self.args.cispo_epsilon_low,
+                epsilon_upper=self.args.cispo_epsilon_high,
+                max_log_ratio=self.args.max_log_ratio,
+            )
+        else:
+            loss, stats = grpo_loss(
+                trainer_log_probs=inputs["trainer_logprobs"],
+                inference_log_probs=inputs["inference_logprobs"],
+                advantages=inputs["advantages"],
+                completion_mask=inputs["loss_mask"],
+                epsilon_lower=self.args.epsilon_lower,
+                epsilon_upper=self.args.epsilon_upper,
+                beta=self.args.beta,
+                max_log_ratio=self.args.max_log_ratio,
+            )
 
         if return_outputs:
             return loss, stats
@@ -490,17 +591,21 @@ class AsyncGRPOTrainer(Trainer):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         chunk_size: int = 4,
-    ) -> torch.Tensor:
+    ) -> tuple:
         """
-        Compute per-token log probabilities for a full sequence.
+        Compute per-token log probabilities and entropy for a full sequence.
 
         Processes in mini-batches of ``chunk_size`` to avoid OOM.
 
         Returns:
-            logprobs: (B, L-1) – shifted so that logprobs[:, t]
-                      corresponds to log P(input_ids[:, t+1] | context).
+            logprobs:  (B, L-1) – shifted so that logprobs[:, t]
+                       corresponds to log P(input_ids[:, t+1] | context).
+            entropies: (B, L-1) – per-token Shannon entropy (nats) at each
+                       shifted position, computed from the full vocabulary
+                       distribution.
         """
         all_logprobs = []
+        all_entropies = []
         B = input_ids.shape[0]
 
         for start in range(0, B, chunk_size):
@@ -521,9 +626,17 @@ class AsyncGRPOTrainer(Trainer):
             chunk_logprobs = selective_log_softmax(logits, targets)
             all_logprobs.append(chunk_logprobs)
 
+            # Compute per-token entropy (no grad needed)
+            with torch.no_grad():
+                chunk_ent = entropy_from_logits(logits)  # (chunk, L-1)
+            all_entropies.append(chunk_ent)
+
             del logits  # free the large tensor immediately
 
-        return torch.cat(all_logprobs, dim=0)  # (B, L-1)
+        return (
+            torch.cat(all_logprobs, dim=0),    # (B, L-1)
+            torch.cat(all_entropies, dim=0),   # (B, L-1)
+        )
 
     # ================================================================
     #  vLLM weight sync (NCCL-based)
@@ -675,10 +788,28 @@ class AsyncGRPOTrainer(Trainer):
     #  Logging (merge GRPO metrics into Trainer logs)
     # ================================================================
 
+    # ── Essential metrics whitelist ────────────────────────────────────
+    _ESSENTIAL_METRICS = {
+        "rewards/mean",
+        "rewards/std",
+        "loss/total",
+        "loss/pg_loss",
+        "loss/kl",                       # GRPO only (absent for CISPO)
+        "train/completion_len_mean",
+        "train/completion_len_max",
+        "train/entropy",
+        "rewards/zero_var_group_frac",
+        "learning_rate",
+        "grad_norm",
+    }
+
     def log(self, logs: dict, start_time: Optional[float] = None) -> None:
         """
         Override to inject accumulated GRPO metrics into every log call
         and optionally log a wandb completions table.
+
+        Only essential metrics are forwarded to wandb / the HF logger
+        to keep dashboards clean.
         """
         # Average the accumulated GRPO metrics
         grpo_avg = {
@@ -686,7 +817,13 @@ class AsyncGRPOTrainer(Trainer):
             for key, vals in self._grpo_metrics.items()
             if vals
         }
-        logs = {**logs, **grpo_avg}
+        all_logs = {**logs, **grpo_avg}
+
+        # Filter to only essential metrics (+ any eval/* metrics)
+        logs = {
+            k: v for k, v in all_logs.items()
+            if k in self._ESSENTIAL_METRICS or k.startswith("eval/")
+        }
 
         # ── wandb completions table ────────────────────────────────────
         if (
@@ -740,6 +877,22 @@ class AsyncGRPOTrainer(Trainer):
                 num_samples=self.args.eval_num_samples,
                 num_generations=self.args.num_generations,
             )
+
+        # ── Periodic evaluation on held-out test set ─────────────────
+        if (
+            self.evaluator is not None
+            and self.state.global_step > 0
+            and self.state.global_step % self.args.eval_steps == 0
+        ):
+            eval_summary = self.evaluator.run_eval(self.state.global_step)
+            # Log eval metrics to wandb alongside training metrics
+            if eval_summary:
+                eval_logs = {
+                    f"eval/{k}": v
+                    for k, v in eval_summary.items()
+                    if isinstance(v, (int, float))
+                }
+                logs.update(eval_logs)
 
         # ── Log router: combine buffered step line + lr/grad_norm ──────
         if self.log_router and hasattr(self, "_pending_trainer_line"):

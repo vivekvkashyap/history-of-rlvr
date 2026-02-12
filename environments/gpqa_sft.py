@@ -74,6 +74,7 @@ class GPQA_SFT(Environment):
         shuffle_choices: bool = True,
         seed: int = 42,
     ):
+        super().__init__()
         self.split = split
         self.dataset_name = dataset_name
         self.dataset_config = dataset_config
