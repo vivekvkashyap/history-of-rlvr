@@ -25,21 +25,24 @@ def compute_group_advantages(
     Compute group-relative advantages from rewards.
 
     For each group of G completions for the same prompt, the advantage is:
-        A_i = (r_i - mean(r_group)) / (std(r_group) + eps)
+        A_i = r_i - mean(r_group)
+
+    Note: This does NOT normalize by std, matching Prime-RL's implementation.
+    Standard deviation normalization can harm training with binary rewards
+    and reduce gradient magnitudes excessively.
 
     Args:
         rewards: (B * G,) flat tensor of rewards
         num_generations: G – number of completions per prompt
-        eps: small constant for numerical stability
+        eps: small constant for numerical stability (unused, kept for API compat)
 
     Returns:
-        advantages: (B * G,) tensor of normalized advantages
+        advantages: (B * G,) tensor of advantages
     """
     # Reshape to (B, G)
     grouped = rewards.view(-1, num_generations)
     mean = grouped.mean(dim=1, keepdim=True)      # (B, 1)
-    std = grouped.std(dim=1, keepdim=True)         # (B, 1)
-    advantages = (grouped - mean) / (std + eps)    # (B, G)
+    advantages = grouped - mean                    # (B, G)
     return advantages.view(-1)                     # (B * G,)
 
 

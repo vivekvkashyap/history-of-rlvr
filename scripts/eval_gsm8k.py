@@ -8,14 +8,22 @@ on environments.gsm8k_rl or environments.base.
 
 Requires vLLM server running separately. Start it first, then run this script.
 
-Usage:
-    # 1. Start vLLM (in another terminal)
-    python -m rl.async_rl.server --model Qwen/Qwen2.5-1.5B-Instruct --port 8000 ...
+Usage for GRPO/DAPO LoRA checkpoint (outputs/gsm8k_rl_grpo/checkpoint-50):
 
-    # 2. Run evaluation
-    cd history_of_rlvr
-    python scripts/eval_gsm8k.py --model_name Qwen/Qwen2.5-1.5B-Instruct
-    python scripts/eval_gsm8k.py --model_name outputs/gsm8k_rl_grpo/merged-50 --num_problems 200
+    # Option A: Serve LoRA directly with vLLM
+    # Terminal 1:
+    ./scripts/serve_lora_for_eval.sh outputs/gsm8k_rl_grpo/checkpoint-50
+    # Terminal 2:
+    python scripts/eval_gsm8k.py --model_name gsm8k-lora --num_problems 1319
+
+    # Option B: Merge LoRA first, then serve merged model
+    python scripts/merge_lora_checkpoint.py outputs/gsm8k_rl_grpo/checkpoint-50
+    vllm serve outputs/gsm8k_rl_grpo/merged-50 --port 8000 ...
+    python scripts/eval_gsm8k.py --model_name outputs/gsm8k_rl_grpo/merged-50 --num_problems 1319
+
+For base model only:
+    vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8000 ...
+    python scripts/eval_gsm8k.py --model_name Qwen/Qwen2.5-0.5B-Instruct --num_problems 500
 """
 
 import argparse

@@ -84,7 +84,7 @@ def cispo_loss(
 
     # ── Logging stats ──────────────────────────────────────────────────
     with torch.no_grad():
-        masked_pg = (per_token_loss).sum() / (num_valid_tokens + 1e-8)
+        masked_pg = per_token_loss.sum() / (num_valid_tokens + 1e-8)
         mean_ratio = (ratio * completion_mask).sum() / (num_valid_tokens + 1e-8)
         mean_clipped_ratio = (clipped_ratio * completion_mask).sum() / (num_valid_tokens + 1e-8)
         clipped = ((ratio < 1.0 - epsilon_lower) | (ratio > 1.0 + epsilon_upper))

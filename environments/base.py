@@ -302,6 +302,12 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     console.print(f"  Model        {config.model_name}")
     if config.algorithm == "cispo":
         console.print(f"  CISPO        G={config.num_generations}  eps_high={config.cispo_epsilon_high}  eps_low={config.cispo_epsilon_low}")
+    elif config.algorithm == "dapo":
+        console.print(
+            f"  DAPO         G={config.num_generations}  "
+            f"eps_lo={config.epsilon_lower}  eps_hi={config.epsilon_upper}  "
+            f"max_len={config.dapo_overlong_max_length}"
+        )
     else:
         console.print(f"  GRPO         G={config.num_generations}  eps_lo={config.epsilon_lower}  eps_hi={config.epsilon_upper}  beta={config.beta}")
     console.print(f"  Train        lr={config.learning_rate}  steps={config.max_steps}  batch={config.batch_size}  micro={config.micro_batch_size}")
@@ -441,6 +447,7 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
     vllm_port = "8000"
     vllm_host = "0.0.0.0"
     vllm_gpu_id = "1"
+    vllm_gpu_mem = "0.9"   # 0.5 if single-GPU (leaves room for trainer)
     has_output_dir = False
 
     for i, arg in enumerate(forwarded_args):
@@ -453,6 +460,8 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
             vllm_port = forwarded_args[i + 1]
         elif arg == "--vllm_server_host" and i + 1 < len(forwarded_args):
             vllm_host = forwarded_args[i + 1]
+        elif arg == "--vllm_gpu_memory_utilization" and i + 1 < len(forwarded_args):
+            vllm_gpu_mem = forwarded_args[i + 1]
 
     # Inject --output_dir into forwarded args so the training process
     # writes logs to the same directory the Trainer pane tails.
@@ -533,6 +542,12 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
     os.makedirs(script_dir, exist_ok=True)
 
     # ── Pane 0: vLLM server ───────────────────────────────────────────
+    # Extract max_model_len from forwarded args, default to 4096 for long contexts
+    vllm_max_model_len = "4096"  # Default: enough for long GPQA questions + responses
+    for i, arg in enumerate(forwarded_args):
+        if arg == "--vllm_max_model_len" and i + 1 < len(forwarded_args):
+            vllm_max_model_len = forwarded_args[i + 1]
+    
     server_script = os.path.join(script_dir, "server.sh")
     with open(server_script, "w") as f:
         f.write("#!/bin/bash\n")
@@ -544,9 +559,9 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
             f"--host {vllm_host} "
             f"--port {vllm_port} "
             f"--tensor-parallel-size 1 "
-            f"--gpu-memory-utilization 0.9 "
+            f"--gpu-memory-utilization {vllm_gpu_mem} "
             f"--dtype bfloat16 "
-            f"--max-model-len 1536 "
+            f"--max-model-len {vllm_max_model_len} "
             # f"--max-num-seqs 512 "
             f"--enforce-eager "
             f"--disable-log-stats\n"

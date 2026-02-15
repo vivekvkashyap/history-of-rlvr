@@ -1,8 +1,11 @@
 """
-GPQA Environment – RL variant (Graduate-level science multiple-choice questions).
+GPQA RL Environment – Graduate-level science multiple-choice questions.
 
 Single-file environment for GRPO training on GPQA (Diamond subset).
-Defines the dataset loader, prompt format, and reward function.
+Defines the dataset loader, prompt format, and binary reward function.
+
+Reward: Binary correctness only. Extract answer letter from \\boxed{}, compare to ground truth.
+  1.0 if correct, 0.0 if wrong.
 
 Dataset: ``Idavidrein/gpqa`` on HuggingFace Hub (requires accepting terms).
          Covers expert-level questions in biology, physics, and chemistry.
@@ -30,11 +33,16 @@ from environments.base import Environment, run
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  GPQA Environment
+#  GPQA RL Environment
 # ════════════════════════════════════════════════════════════════════════
 
 
 ANSWER_LETTERS = ["A", "B", "C", "D"]
+
+# Pattern to match \boxed{...} in model completions
+# Model outputs contain literal backslash chars, e.g., the text: \boxed{A}
+# The raw string r"\\boxed\{([^}]*)\}" matches: \ + boxed + { + content + }
+_ANSWER_PATTERN = re.compile(r"\\boxed\{([^}]*)\}", re.IGNORECASE)
 
 
 class GPQA(Environment):
@@ -45,15 +53,14 @@ class GPQA(Environment):
     in biology, physics, and chemistry.
 
     Dataset: ``Idavidrein/gpqa`` (config ``gpqa_diamond``, 198 questions).
-    Reward: binary 1.0 if extracted answer letter matches correct answer.
+    Reward: binary 1.0 if extracted answer letter matches correct answer, 0.0 otherwise.
     """
 
     name = "gpqa_rl"
 
     system_prompt = (
-        "You are an expert scientist. Answer the following multiple-choice "
-        "question by reasoning step by step. At the end, state your final "
-        "answer as a single letter (A, B, C, or D) after 'The answer is '."
+        "Please reason step by step, then ONLY give the letter of the correct "
+        "answer within \\boxed{}."
     )
 
     def __init__(
@@ -87,7 +94,7 @@ class GPQA(Environment):
             # "max_steps": 500,
             # "num_generations": 16,
             # "batch_size": 512,
-            # "max_new_tokens": 2048,
+            # "max_new_tokens": 1024,
             # "temperature": 0.7,
         }
 
@@ -108,37 +115,35 @@ class GPQA(Environment):
 
         data = []
         for item in ds:
-            question = item["Question"]
-            correct = item["Correct Answer"]
-            distractors = [
-                item["Incorrect Answer 1"],
-                item["Incorrect Answer 2"],
-                item["Incorrect Answer 3"],
-            ]
-
-            # Build choices list: [(text, is_correct), ...]
-            choices = [(correct, True)] + [(d, False) for d in distractors]
+            q = item["Question"]
+            
+            # Shuffle the letter assignments
+            letters = ANSWER_LETTERS.copy()
             if self.shuffle_choices:
-                rng.shuffle(choices)
-
-            # Assign letters and find the correct one
-            correct_letter = ""
-            choice_lines = []
-            for i, (text, is_correct) in enumerate(choices):
-                letter = ANSWER_LETTERS[i]
-                choice_lines.append(f"({letter}) {text}")
-                if is_correct:
-                    correct_letter = letter
-
-            # Format question with choices
-            question_with_choices = (
-                f"{question}\n\n" + "\n".join(choice_lines)
-            )
+                rng.shuffle(letters)
+            
+            # Create mapping: index -> letter
+            itos = {k: v for k, v in enumerate(letters)}
+            
+            # Create answer mapping: letter -> answer text
+            ans = {
+                itos[0]: item["Correct Answer"],
+                itos[1]: item["Incorrect Answer 1"],
+                itos[2]: item["Incorrect Answer 2"],
+                itos[3]: item["Incorrect Answer 3"],
+            }
+            
+            # Format question
+            question = f"Question: {q}\n\n"
+            question += f"A: {ans['A']}\n"
+            question += f"B: {ans['B']}\n"
+            question += f"C: {ans['C']}\n"
+            question += f"D: {ans['D']}"
 
             data.append({
-                "prompt": self.format_prompt(question_with_choices),
-                "ground_truth": correct_letter,
-                "question": question,
+                "prompt": self.format_prompt(question),
+                "ground_truth": itos[0],  # The correct answer is at index 0
+                "question": q,
             })
 
         return data
@@ -150,7 +155,9 @@ class GPQA(Environment):
         completions: List[str],
         ground_truths: List[str],
     ) -> List[float]:
-        """Binary reward: 1.0 if extracted answer letter matches ground truth."""
+        """
+        Reward: Binary correctness (1.0 or 0.0) from \\boxed{...}.
+        """
         assert len(completions) == len(ground_truths), (
             f"Length mismatch: {len(completions)} completions vs "
             f"{len(ground_truths)} ground truths"
@@ -163,21 +170,63 @@ class GPQA(Environment):
     # ── Evaluation ──────────────────────────────────────────────────────
 
     def get_eval_dataset(self) -> List[Dict[str, str]]:
-        """Load GPQA test split for evaluation (re-uses train split since GPQA is small)."""
-        # GPQA Diamond only has a 'train' split; use it for eval with a seed-based subsample
-        return self.get_dataset()
+        """Load GPQA test split for evaluation."""
+        ds = load_dataset(
+            self.dataset_name, self.dataset_config, split="test",
+        )
+        rng = random.Random(self.seed)
+
+        data = []
+        for item in ds:
+            q = item["Question"]
+            
+            # Shuffle the letter assignments
+            letters = ANSWER_LETTERS.copy()
+            if self.shuffle_choices:
+                rng.shuffle(letters)
+            
+            # Create mapping: index -> letter
+            itos = {k: v for k, v in enumerate(letters)}
+            
+            # Create answer mapping: letter -> answer text
+            ans = {
+                itos[0]: item["Correct Answer"],
+                itos[1]: item["Incorrect Answer 1"],
+                itos[2]: item["Incorrect Answer 2"],
+                itos[3]: item["Incorrect Answer 3"],
+            }
+            
+            # Format question
+            question = f"Question: {q}\n\n"
+            question += f"A: {ans['A']}\n"
+            question += f"B: {ans['B']}\n"
+            question += f"C: {ans['C']}\n"
+            question += f"D: {ans['D']}"
+
+            data.append({
+                "prompt": self.format_prompt(question),
+                "ground_truth": itos[0],  # The correct answer is at index 0
+                "question": q,
+            })
+
+        return data
 
     @classmethod
     def compute_reward_details(
         cls, completion: str, ground_truth: str,
     ) -> Dict[str, Any]:
-        """Per-component reward breakdown for a single completion."""
-        predicted = cls._extract_answer_letter(completion)
-        correct = predicted == ground_truth.upper()
+        """
+        Binary correctness: 1.0 if correct, 0.0 if wrong.
+        Answer extracted from \\boxed{}, compared to ground truth.
+        """
+        extracted = cls._extract_answer_letter(completion)
+        is_correct = extracted == ground_truth.upper()
+        total = 1.0 if is_correct else 0.0
+
         return {
-            "correctness": 1.0 if correct else 0.0,
-            "total": 1.0 if correct else 0.0,
-            "extracted_answer": predicted,
+            "correctness": total,
+            "total": total,
+            "extracted_answer": extracted,
         }
 
     # ── Private helpers ────────────────────────────────────────────────
@@ -187,26 +236,19 @@ class GPQA(Environment):
         """
         Extract the answer letter (A/B/C/D) from a model completion.
 
-        Tries multiple heuristics:
-          1. ``The answer is (X)`` or ``The answer is X``
-          2. ``\\boxed{X}``
-          3. Last standalone letter A/B/C/D in the text
+        Primary method: Extract from \\boxed{X} as per system prompt.
+        Fallback: Last standalone letter A/B/C/D in the text.
         """
-        # Strategy 1: "the answer is X" pattern
-        match = re.search(
-            r"(?:the\s+)?answer\s+is\s*[:\s]*\(?([A-Da-d])\)?",
-            completion,
-            re.IGNORECASE,
-        )
+        # Strategy 1: \boxed{X} - primary method as per system prompt
+        match = _ANSWER_PATTERN.search(completion)
         if match:
-            return match.group(1).upper()
+            content = match.group(1).strip().upper()
+            # Extract just the letter if present
+            letter_match = re.search(r"([A-D])", content)
+            if letter_match:
+                return letter_match.group(1)
 
-        # Strategy 2: \boxed{X}
-        match = re.search(r"\\boxed\{([A-Da-d])\}", completion)
-        if match:
-            return match.group(1).upper()
-
-        # Strategy 3: last standalone letter A-D
+        # Fallback: last standalone letter A-D
         matches = re.findall(r"\b([A-Da-d])\b", completion)
         # Filter to only valid answer letters
         valid = [m.upper() for m in matches if m.upper() in ANSWER_LETTERS]
@@ -217,7 +259,10 @@ class GPQA(Environment):
 
     @classmethod
     def _compute_single_reward(cls, completion: str, ground_truth: str) -> float:
-        """Binary reward for a single completion."""
+        """
+        Binary correctness reward: 1.0 if correct, 0.0 if wrong.
+        Answer extracted from \\boxed{...} as per system prompt.
+        """
         predicted = cls._extract_answer_letter(completion)
         return 1.0 if predicted == ground_truth.upper() else 0.0
 

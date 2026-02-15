@@ -33,6 +33,8 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 from rl.algorithms.grpo.grpo import grpo_loss
 from rl.algorithms.cispo.cispo import cispo_loss
+from rl.algorithms.dapo.dapo import dapo_loss
+from rl.algorithms.prime.prime import prime_loss
 
 from rl.async_rl.config import AsyncGRPOConfig
 from rl.async_rl.client import VLLMClient
@@ -143,6 +145,14 @@ class AsyncGRPOTrainer(Trainer):
         if args.use_lora and isinstance(args.lora_config, PeftConfig):
             model = get_peft_model(model, args.lora_config)
 
+        # Gradient checkpointing with use_reentrant=True (the default in
+        # some transformers versions) requires at least one forward-pass
+        # input to have requires_grad=True.  Since input_ids and
+        # attention_mask are integer tensors, we register a hook on the
+        # embedding layer so its output carries requires_grad=True.
+        if args.gradient_checkpointing:
+            model.enable_input_require_grads()
+
         super().__init__(
             model=model,
             args=args,
@@ -221,6 +231,9 @@ class AsyncGRPOTrainer(Trainer):
             continuous_batching=args.continuous_batching,
             pool_size=args.pool_size,
             log_router=log_router,
+            algorithm=args.algorithm,
+            dapo_overlong_max_length=args.dapo_overlong_max_length,
+            dapo_overlong_cache=args.dapo_overlong_cache,
         )
         self.orchestrator.start()
         if not args.continuous_batching:
@@ -551,11 +564,21 @@ class AsyncGRPOTrainer(Trainer):
         num_items_in_batch: Any = None,
     ):
         """
-        Compute the RL loss (GRPO or CISPO depending on config).
+        Compute the RL loss (GRPO, CISPO, or DAPO depending on config).
 
         Delegates to the standalone loss function from ``rl/algorithms/``.
         """
-        if self.args.algorithm == "cispo":
+        if self.args.algorithm == "prime":
+            loss, stats = prime_loss(
+                trainer_log_probs=inputs["trainer_logprobs"],
+                inference_log_probs=inputs["inference_logprobs"],
+                advantages=inputs["advantages"],
+                completion_mask=inputs["loss_mask"],
+                token_mask_low=self.args.prime_token_mask_low,
+                token_mask_high=self.args.prime_token_mask_high,
+                max_log_ratio=self.args.max_log_ratio,
+            )
+        elif self.args.algorithm == "cispo":
             loss, stats = cispo_loss(
                 trainer_log_probs=inputs["trainer_logprobs"],
                 inference_log_probs=inputs["inference_logprobs"],
@@ -563,6 +586,16 @@ class AsyncGRPOTrainer(Trainer):
                 completion_mask=inputs["loss_mask"],
                 epsilon_lower=self.args.cispo_epsilon_low,
                 epsilon_upper=self.args.cispo_epsilon_high,
+                max_log_ratio=self.args.max_log_ratio,
+            )
+        elif self.args.algorithm == "dapo":
+            loss, stats = dapo_loss(
+                trainer_log_probs=inputs["trainer_logprobs"],
+                inference_log_probs=inputs["inference_logprobs"],
+                advantages=inputs["advantages"],
+                completion_mask=inputs["loss_mask"],
+                epsilon_lower=self.args.epsilon_lower,
+                epsilon_upper=self.args.epsilon_upper,
                 max_log_ratio=self.args.max_log_ratio,
             )
         else:
@@ -684,25 +717,45 @@ class AsyncGRPOTrainer(Trainer):
                 )
 
         if not inflight:
-            # Legacy mode: wait for generation to finish
-            # In continuous batching, pause the pool and wait for drainage
+            # Legacy mode: wait for generation to finish before syncing.
+            #
+            # Two different wait strategies depending on batching mode:
+            #   - Continuous batching: is_generating stays True for the
+            #     lifetime of the pool (set at startup, cleared at shutdown),
+            #     so we can only rely on _pool_in_flight reaching 0 after
+            #     the pool has been paused above.
+            #   - Batch-at-a-time: is_generating toggles per batch, so we
+            #     wait for it to become False.
             waits = 0
-            while self.orchestrator.is_generating or (
-                self.args.continuous_batching and self.orchestrator._pool_in_flight > 0
-            ):
-                time.sleep(0.5)
-                waits += 1
-                if waits % 10 == 0:
-                    if self.log_router:
-                        self.log_router.log_inference(
-                            f"[yellow]Waiting for generation to finish before syncing "
-                            f"(is_generating={self.orchestrator.is_generating}, "
-                            f"pool_in_flight={self.orchestrator._pool_in_flight})[/yellow]"
-                        )
-                    else:
-                        logger.info(
-                            "Waiting for generation to finish before syncing..."
-                        )
+            if self.args.continuous_batching:
+                while self.orchestrator._pool_in_flight > 0:
+                    time.sleep(0.5)
+                    waits += 1
+                    if waits % 10 == 0:
+                        if self.log_router:
+                            self.log_router.log_inference(
+                                f"[yellow]Waiting for pool to drain before syncing "
+                                f"(pool_in_flight={self.orchestrator._pool_in_flight})[/yellow]"
+                            )
+                        else:
+                            logger.info(
+                                f"Waiting for pool to drain "
+                                f"(pool_in_flight={self.orchestrator._pool_in_flight})..."
+                            )
+            else:
+                while self.orchestrator.is_generating:
+                    time.sleep(0.5)
+                    waits += 1
+                    if waits % 10 == 0:
+                        if self.log_router:
+                            self.log_router.log_inference(
+                                f"[yellow]Waiting for generation to finish before syncing "
+                                f"(is_generating={self.orchestrator.is_generating})[/yellow]"
+                            )
+                        else:
+                            logger.info(
+                                "Waiting for generation to finish before syncing..."
+                            )
 
         unwrapped = self.accelerator.unwrap_model(self.model)
 
@@ -799,6 +852,14 @@ class AsyncGRPOTrainer(Trainer):
         "train/completion_len_max",
         "train/entropy",
         "rewards/zero_var_group_frac",
+        "train/dapo_dynamic_filtered",   # DAPO: prompts filtered (all-correct/all-wrong)
+        "train/dapo_overlong_penalized", # DAPO: completions penalized for length
+        "train/clip_fraction",
+        "train/importance_ratio",
+        "train/mask_fraction",            # Prime: fraction of tokens masked out
+        "train/mask_fraction_low",        # Prime: masked because ratio too low
+        "train/mask_fraction_high",       # Prime: masked because ratio too high
+        "loss/mismatch_kl",               # Prime: KL between old and new policy
         "learning_rate",
         "grad_norm",
     }

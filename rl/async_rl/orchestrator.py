@@ -158,6 +158,11 @@ class Orchestrator:
         pool_size: int = 16,
         # ── Log router (optional) ─────────────────────────────────────
         log_router: Any = None,
+        # ── Algorithm (needed for DAPO automatic features) ──────────
+        algorithm: str = "grpo",
+        # ── DAPO Overlong Reward Shaping params ─────────────────────
+        dapo_overlong_max_length: int = 16384,
+        dapo_overlong_cache: int = 4096,
     ):
         self.server_base_url = server_base_url
         self.max_concurrent = max_concurrent
@@ -179,6 +184,9 @@ class Orchestrator:
         self.continuous_batching = continuous_batching
         self.pool_size = pool_size
         self.log_router = log_router
+        self.algorithm = algorithm
+        self.dapo_overlong_max_length = dapo_overlong_max_length
+        self.dapo_overlong_cache = dapo_overlong_cache
 
         # Queues for thread communication
         self.request_queue: queue.Queue[Optional[int]] = queue.Queue()
@@ -493,6 +501,37 @@ class Orchestrator:
             await asyncio.gather(*active_tasks, return_exceptions=True)
 
     # ════════════════════════════════════════════════════════════════════
+    #  DAPO helpers
+    # ════════════════════════════════════════════════════════════════════
+
+    def _compute_overlong_penalty(
+        self,
+        completion_lengths: List[int],
+    ) -> List[float]:
+        """
+        Soft overlong punishment per DAPO paper Equation 13.
+
+        Automatic when algorithm="dapo".
+
+        R_length(y) = {
+            0,                                  if |y| ≤ L_max - L_cache
+            (L_max - L_cache - |y|) / L_cache,  if L_max - L_cache < |y| ≤ L_max
+            -1,                                 if |y| > L_max
+        }
+        """
+        penalties = []
+        threshold = self.dapo_overlong_max_length - self.dapo_overlong_cache
+
+        for length in completion_lengths:
+            if length <= threshold:
+                penalties.append(0.0)
+            elif length <= self.dapo_overlong_max_length:
+                penalties.append((threshold - length) / self.dapo_overlong_cache)
+            else:
+                penalties.append(-1.0)
+        return penalties
+
+    # ════════════════════════════════════════════════════════════════════
     #  Batch generation (runs inside the worker's asyncio loop)
     # ════════════════════════════════════════════════════════════════════
 
@@ -631,15 +670,101 @@ class Orchestrator:
         # ── 3. Compute rewards ─────────────────────────────────────────
         expanded_gts = [gt for gt in ground_truths for _ in range(G)]
         rewards = self.reward_fn(all_completions, expanded_gts)
+
+        # ── 3b. Overlong Reward Shaping (automatic for DAPO) ──────────
+        # Apply soft punishment for overlong responses before computing
+        # advantages, so the advantage computation sees shaped rewards.
+        # (DAPO paper Equation 13)
+        num_overlong_penalized = 0
+        if self.algorithm == "dapo":
+            overlong_penalties = self._compute_overlong_penalty(comp_lengths)
+            rewards = [r + p for r, p in zip(rewards, overlong_penalties)]
+            num_overlong_penalized = sum(1 for p in overlong_penalties if p != 0.0)
+
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+
+        # ── 3c. Zero-variance group fraction (computed BEFORE dynamic
+        #    sampling so it reflects the true fraction of useless groups)
+        grouped_rewards_pre = rewards_tensor.view(-1, G)
+        group_std_pre = grouped_rewards_pre.std(dim=1)
+        zero_var_frac = (group_std_pre == 0).float().mean().item()
+
+        # ── 3d. Dynamic Sampling (automatic for DAPO) ─────────────────
+        # Filter out prompts where all G completions are either all
+        # correct (reward > 0) or all wrong (reward ≤ 0). These prompts
+        # produce zero-variance advantages and zero gradients.
+        # (DAPO paper Equation 11)
+        num_dynamic_filtered = 0
+        if self.algorithm == "dapo":
+            grouped_rewards_ds = rewards_tensor.view(-1, G)
+            correct_counts = (grouped_rewards_ds > 0).sum(dim=1)  # (B,)
+
+            # Keep only prompts with mixed results: 0 < correct_count < G
+            valid_mask = (correct_counts > 0) & (correct_counts < G)
+            valid_ds_indices = valid_mask.nonzero(as_tuple=False).squeeze(1).tolist()
+
+            num_dynamic_filtered = B - len(valid_ds_indices)
+
+            if len(valid_ds_indices) == 0:
+                # All prompts filtered – return empty batch
+                self.is_generating = False
+                ver_min = min(all_start_versions) if all_start_versions else 0
+                ver_max = max(all_end_versions) if all_end_versions else 0
+                t_total = time.time() - t_start
+                if self.log_router:
+                    self.log_router.log_inference(
+                        f"[red]DAPO Dynamic Sampling: all {B} prompts "
+                        f"filtered (all-correct or all-wrong) – "
+                        f"returning empty batch[/red]"
+                    )
+                empty = torch.zeros(0)
+                return Batch(
+                    batch_id=batch_id,
+                    input_ids=empty, attention_mask=empty,
+                    loss_mask=empty, inference_logprobs=empty,
+                    advantages=empty,
+                    num_valid_prompts=0,
+                    policy_version_min=ver_min,
+                    policy_version_max=ver_max,
+                    generation_time=t_total,
+                    metrics={
+                        "train/num_discarded_prompts": float(num_discarded),
+                        "train/dapo_dynamic_filtered": float(B),
+                        "train/generate_s": t_total,
+                    },
+                )
+
+            if num_dynamic_filtered > 0:
+                if self.log_router:
+                    self.log_router.log_inference(
+                        f"[yellow]DAPO Dynamic Sampling: filtered "
+                        f"{num_dynamic_filtered}/{B} prompts "
+                        f"(all-correct or all-wrong)[/yellow]"
+                    )
+
+                # Re-index everything to keep only valid prompts
+                prompts = [prompts[i] for i in valid_ds_indices]
+                ground_truths = [ground_truths[i] for i in valid_ds_indices]
+
+                # Re-index flat per-completion lists (each prompt has G entries)
+                keep_flat = []
+                for i in valid_ds_indices:
+                    keep_flat.extend(range(i * G, (i + 1) * G))
+
+                all_completions = [all_completions[j] for j in keep_flat]
+                all_token_ids = [all_token_ids[j] for j in keep_flat]
+                all_logprobs = [all_logprobs[j] for j in keep_flat]
+                comp_lengths = [comp_lengths[j] for j in keep_flat]
+
+                all_start_versions = [all_start_versions[i] for i in valid_ds_indices]
+                all_end_versions = [all_end_versions[i] for i in valid_ds_indices]
+
+                rewards_tensor = rewards_tensor[torch.tensor(keep_flat, dtype=torch.long)]
+                rewards = rewards_tensor.tolist()
+                B = len(prompts)
 
         # ── 4. GRPO group-relative advantages ──────────────────────────
         advantages = compute_group_advantages(rewards_tensor, G)
-
-        # ── 4b. Zero-variance group fraction ─────────────────────────
-        grouped_rewards = rewards_tensor.view(-1, G)
-        group_std = grouped_rewards.std(dim=1)
-        zero_var_frac = (group_std == 0).float().mean().item()
 
         # ── 5. Tokenize & build tensors ────────────────────────────────
         expanded_prompts = [p for p in prompts for _ in range(G)]
@@ -666,6 +791,9 @@ class Orchestrator:
             "train/policy_version_min": float(ver_min),
             "train/policy_version_max": float(ver_max),
         }
+        if self.algorithm == "dapo":
+            metrics["train/dapo_dynamic_filtered"] = float(num_dynamic_filtered)
+            metrics["train/dapo_overlong_penalized"] = float(num_overlong_penalized)
 
         return Batch(
             batch_id=batch_id,
@@ -890,15 +1018,87 @@ class Orchestrator:
         # ── Compute rewards ───────────────────────────────────────────
         expanded_gts = [gt for gt in ground_truths for _ in range(G)]
         rewards = self.reward_fn(all_completions, expanded_gts)
+
+        # ── Overlong Reward Shaping (automatic for DAPO) ──────────────
+        num_overlong_penalized = 0
+        if self.algorithm == "dapo":
+            overlong_penalties = self._compute_overlong_penalty(comp_lengths)
+            rewards = [r + p for r, p in zip(rewards, overlong_penalties)]
+            num_overlong_penalized = sum(1 for p in overlong_penalties if p != 0.0)
+
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+
+        # ── Zero-variance group fraction (computed BEFORE dynamic
+        #    sampling so it reflects the true fraction of useless groups)
+        grouped_rewards_pre = rewards_tensor.view(-1, G)
+        group_std_pre = grouped_rewards_pre.std(dim=1)
+        zero_var_frac = (group_std_pre == 0).float().mean().item()
+
+        # ── Dynamic Sampling (automatic for DAPO) ─────────────────────
+        num_dynamic_filtered = 0
+        if self.algorithm == "dapo":
+            grouped_rewards_ds = rewards_tensor.view(-1, G)
+            correct_counts = (grouped_rewards_ds > 0).sum(dim=1)
+
+            valid_mask = (correct_counts > 0) & (correct_counts < G)
+            valid_ds_indices = valid_mask.nonzero(as_tuple=False).squeeze(1).tolist()
+
+            num_dynamic_filtered = B - len(valid_ds_indices)
+
+            if len(valid_ds_indices) == 0:
+                ver_min = min(all_start_versions) if all_start_versions else 0
+                ver_max = max(all_end_versions) if all_end_versions else 0
+                t_total = time.time() - t_start
+                if self.log_router:
+                    self.log_router.log_inference(
+                        f"[red]DAPO Dynamic Sampling: all {B} prompts "
+                        f"filtered – returning empty batch[/red]"
+                    )
+                empty = torch.zeros(0)
+                return Batch(
+                    batch_id=batch_id,
+                    input_ids=empty, attention_mask=empty,
+                    loss_mask=empty, inference_logprobs=empty,
+                    advantages=empty,
+                    num_valid_prompts=0,
+                    policy_version_min=ver_min,
+                    policy_version_max=ver_max,
+                    generation_time=t_total,
+                    metrics={
+                        "train/num_discarded_prompts": float(num_discarded),
+                        "train/dapo_dynamic_filtered": float(B),
+                        "train/generate_s": t_total,
+                    },
+                )
+
+            if num_dynamic_filtered > 0:
+                if self.log_router:
+                    self.log_router.log_inference(
+                        f"[yellow]DAPO Dynamic Sampling: filtered "
+                        f"{num_dynamic_filtered}/{B} prompts[/yellow]"
+                    )
+
+                prompts = [prompts[i] for i in valid_ds_indices]
+                ground_truths = [ground_truths[i] for i in valid_ds_indices]
+
+                keep_flat = []
+                for i in valid_ds_indices:
+                    keep_flat.extend(range(i * G, (i + 1) * G))
+
+                all_completions = [all_completions[j] for j in keep_flat]
+                all_token_ids = [all_token_ids[j] for j in keep_flat]
+                all_logprobs = [all_logprobs[j] for j in keep_flat]
+                comp_lengths = [comp_lengths[j] for j in keep_flat]
+
+                all_start_versions = [all_start_versions[i] for i in valid_ds_indices]
+                all_end_versions = [all_end_versions[i] for i in valid_ds_indices]
+
+                rewards_tensor = rewards_tensor[torch.tensor(keep_flat, dtype=torch.long)]
+                rewards = rewards_tensor.tolist()
+                B = len(prompts)
 
         # ── GRPO group-relative advantages ────────────────────────────
         advantages = compute_group_advantages(rewards_tensor, G)
-
-        # ── Zero-variance group fraction ──────────────────────────────
-        grouped_rewards = rewards_tensor.view(-1, G)
-        group_std = grouped_rewards.std(dim=1)
-        zero_var_frac = (group_std == 0).float().mean().item()
 
         # ── Tokenize & build tensors ──────────────────────────────────
         expanded_prompts = [p for p in prompts for _ in range(G)]
@@ -923,6 +1123,9 @@ class Orchestrator:
             "train/policy_version_min": float(ver_min),
             "train/policy_version_max": float(ver_max),
         }
+        if self.algorithm == "dapo":
+            metrics["train/dapo_dynamic_filtered"] = float(num_dynamic_filtered)
+            metrics["train/dapo_overlong_penalized"] = float(num_overlong_penalized)
 
         return Batch(
             batch_id=batch_id,

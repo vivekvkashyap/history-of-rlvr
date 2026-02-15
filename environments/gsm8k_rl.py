@@ -4,9 +4,8 @@ GSM8K Environment – RL variant (Grade-school math word problems).
 Single-file environment for GRPO training on GSM8K. Defines the dataset
 loader, prompt format, and binary reward function.
 
-Reward: Matches system prompt – answer inside \\boxed{}.
-  - Extract answer only from \\boxed{}. Binary correctness: 1.0 (correct) or 0.0 (wrong).
-  - Format reward available via reward_coef (currently disabled with coef=0.0).
+Reward: Binary correctness only. Extract answer from \\boxed{}, compare to ground truth.
+  1.0 if correct, 0.0 if wrong.
 
 Usage:
     cd history_of_rlvr
@@ -22,16 +21,17 @@ Usage:
 """
 
 import re
+import logging
 from typing import Any, Dict, List
 
 from datasets import load_dataset
+from math_verify import verify, parse
 
 from environments.base import Environment, run
 
-# Pattern to match \boxed{...} in model completions
-# Model outputs contain literal backslash chars, e.g., the text: \boxed{42}
-# The raw string r"\\boxed\{([^}]*)\}" matches: \ + boxed + { + content + }
-# Note: In testing, use raw strings for test completions: r"\boxed{42}"
+logger = logging.getLogger(__name__)
+
+# Fallback regex (only used if math_verify fails to parse)
 _ANSWER_PATTERN = re.compile(r"\\boxed\{([^}]*)\}", re.IGNORECASE)
 
 
@@ -146,25 +146,16 @@ class GSM8K(Environment):
         cls, completion: str, ground_truth: str,
     ) -> Dict[str, Any]:
         """
-        Per-component: Binary correctness (1.0 or 0.0) from \\boxed{}.
-        Format reward tracked but disabled via reward_coef=0.0.
+        Binary correctness: 1.0 if correct, 0.0 if wrong.
+        Uses math_verify for robust verification with regex fallback.
         """
+        total = cls._compute_single_reward(completion, ground_truth)
         extracted = cls._extract_answer_from_boxed(completion)
-        is_correct = cls._normalize_number(extracted) == cls._normalize_number(ground_truth)
-        has_format = cls._has_boxed_format(completion)
-
-        correctness = 1.0 if is_correct else 0.0
-        format_reward = 0.5 if has_format else -0.5
-        reward_coef = 0.0
-        total = correctness + (reward_coef * format_reward)
 
         return {
-            "correctness": correctness,
-            "format_reward": format_reward,
-            "reward_coef": reward_coef,
+            "correctness": total,
             "total": total,
             "extracted_answer": extracted,
-            "has_boxed_format": has_format,
         }
 
     # ── Private helpers ────────────────────────────────────────────────
@@ -183,11 +174,6 @@ class GSM8K(Environment):
         if match:
             return match.group(1).strip().replace(",", "").replace("$", "")
         return ""
-
-    @staticmethod
-    def _has_boxed_format(completion: str) -> bool:
-        """True if completion has \\boxed{...} as instructed in prompt."""
-        return _ANSWER_PATTERN.search(completion) is not None
 
     # ── Reward computation ────────────────────────────────────────────
 
@@ -211,16 +197,29 @@ class GSM8K(Environment):
     def _compute_single_reward(cls, completion: str, ground_truth: str) -> float:
         """
         Binary correctness reward: 1.0 if correct, 0.0 if wrong.
-        Answer extracted from \\boxed{...} as per system prompt.
-        """
-        extracted = cls._extract_answer_from_boxed(completion)
-        is_correct = cls._normalize_number(extracted) == cls._normalize_number(ground_truth)
-        has_format = cls._has_boxed_format(completion)
 
-        correctness = 1.0 if is_correct else 0.0
-        format_reward = 0.5 if has_format else -0.5
-        reward_coef = 0.0
-        return correctness + (reward_coef * format_reward)
+        Uses math_verify for robust answer verification (handles LaTeX,
+        equivalent expressions, nested braces, etc.). Falls back to simple
+        regex + string comparison if math_verify cannot parse.
+        """
+        try:
+            # math_verify: parse the model completion and the ground truth,
+            # then verify equivalence. This handles \boxed{}, LaTeX expressions,
+            # nested braces, equivalent number formats, etc.
+            parsed_completion = parse(completion)
+            parsed_gt = parse(ground_truth)
+            if verify(parsed_completion, parsed_gt):
+                return 1.0
+        except Exception:
+            # math_verify failed to parse — fall back to regex extraction
+            pass
+
+        # Fallback: simple regex extraction + string comparison
+        extracted = cls._extract_answer_from_boxed(completion)
+        if extracted and cls._normalize_number(extracted) == cls._normalize_number(ground_truth):
+            return 1.0
+
+        return 0.0
 
 
 # ════════════════════════════════════════════════════════════════════════
