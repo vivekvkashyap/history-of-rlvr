@@ -1,28 +1,28 @@
+"""Dr. GRPO (Group Relative Policy Optimization Done Right).
+Reference: Understanding R1-Zero-Like Training (https://arxiv.org/abs/2503.20783)
+"""
+
 import torch
 from typing import Tuple
 
 
-def _reduce_loss(per_token_loss, completion_mask, reduction):
-    if reduction == "sample":
-        per_sample_tokens = completion_mask.sum(dim=1).clamp(min=1)
-        per_sample_loss = (per_token_loss * completion_mask).sum(dim=1) / per_sample_tokens
-        return per_sample_loss.mean()
-    else:
-        num_valid = completion_mask.sum()
-        return (per_token_loss * completion_mask).sum() / (num_valid + 1e-8)
-
-
-def grpo_loss(
+def dr_grpo_loss(
     trainer_log_probs: torch.Tensor,
     inference_log_probs: torch.Tensor,
     advantages: torch.Tensor,
     completion_mask: torch.Tensor,
     epsilon_lower: float = 0.2,
     epsilon_upper: float = 0.2,
-    beta: float = 0.04,
+    beta: float = 0.0,
     max_log_ratio: float = 10.0,
-    loss_reduction: str = "token",
+    max_tokens: int = 1024,
 ) -> Tuple[torch.Tensor, dict]:
+    """
+    Unbiased GRPO that removes length and std normalization biases.
+
+    Normalizes by constant max_tokens instead of actual response length.
+    Advantages should NOT be std-normalized (handled at config level).
+    """
     log_ratio = trainer_log_probs - inference_log_probs
     log_ratio = torch.clamp(log_ratio, min=-max_log_ratio, max=max_log_ratio)
     ratio = torch.exp(log_ratio)
@@ -37,8 +37,11 @@ def grpo_loss(
     kl_log_ratio = torch.clamp(kl_log_ratio, min=-max_log_ratio, max=max_log_ratio)
     kl = torch.exp(kl_log_ratio) - kl_log_ratio - 1.0
 
-    per_token_loss = pg_loss + beta * kl
-    loss = _reduce_loss(per_token_loss, completion_mask, loss_reduction)
+    per_token_loss = (pg_loss + beta * kl) * completion_mask
+
+    # Constant normalization: per-sample sum / max_tokens, then mean across samples
+    per_sample_loss = per_token_loss.sum(dim=1) / max_tokens
+    loss = per_sample_loss.mean()
 
     num_valid_tokens = completion_mask.sum()
     with torch.no_grad():

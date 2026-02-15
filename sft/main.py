@@ -10,7 +10,7 @@ Usage (from an environment file):
     run_sft(MyEnvironment())
 
 Or directly:
-    python -m environments.gsm8k_sft --model_name Qwen/Qwen2.5-0.5B-Instruct
+    python -m environments.gsm8k.gsm8k_sft --model_name Qwen/Qwen2.5-0.5B-Instruct
 """
 
 import logging

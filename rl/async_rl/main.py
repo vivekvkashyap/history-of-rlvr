@@ -17,8 +17,8 @@ For the full tmux experience, launch via:
 instead of calling this script directly.
 
 For environment-based training (recommended), use:
-    python -m environments.gsm8k_rl --launch
-    python -m environments.gpqa_rl --launch
+    python -m environments.gsm8k.gsm8k_rl --launch
+    python -m environments.gpqa.gpqa_rl --launch
 """
 
 import os

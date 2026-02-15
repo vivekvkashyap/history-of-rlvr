@@ -9,7 +9,7 @@ Provides:
   - ``run_sft``: one-call launcher for environment-based SFT.
 
 Usage:
-    python -m environments.gsm8k_sft --model_name Qwen/Qwen2.5-0.5B-Instruct
+    python -m environments.gsm8k.gsm8k_sft --model_name Qwen/Qwen2.5-0.5B-Instruct
 """
 
 from sft.config import SFTConfig

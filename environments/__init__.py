@@ -1,14 +1,4 @@
-"""
-Environment-based training runner.
-
-Each environment is a single file that defines a dataset, reward function,
-and system prompt.  The ``run()`` helper wires it into the async GRPO
-training backend automatically.
-
-Usage:
-    python -m environments.gsm8k_rl --launch     # full tmux launch
-    python -m environments.gsm8k_rl [train args]  # training only
-"""
+"""Environment-based training runner."""
 
 from environments.base import Environment, EnvironmentDataset, run
 

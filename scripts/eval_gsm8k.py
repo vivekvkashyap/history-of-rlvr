@@ -3,8 +3,8 @@
 Standalone GSM8K evaluation script.
 
 Evaluates a model on the GSM8K test set. Contains its own reward logic
-(extracted from gsm8k_rl) and GSM8K-specific hyperparameters. No dependency
-on environments.gsm8k_rl or environments.base.
+(extracted from environments.gsm8k.gsm8k_rl) and GSM8K-specific hyperparameters. No dependency
+on environments.gsm8k or environments.base.
 
 Requires vLLM server running separately. Start it first, then run this script.
 
@@ -48,7 +48,7 @@ if _ROOT not in sys.path:
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  GSM8K reward logic (from gsm8k_rl.py)
+#  GSM8K reward logic (from environments.gsm8k.gsm8k_rl)
 # ════════════════════════════════════════════════════════════════════════
 
 _ANSWER_PATTERN = re.compile(r"\\boxed\{([^}]*)\}", re.IGNORECASE)
@@ -245,7 +245,7 @@ async def _run_eval(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Standalone GSM8K evaluation (no gsm8k_rl dependency)"
+        description="Standalone GSM8K evaluation (no environments.gsm8k dependency)"
     )
     parser.add_argument(
         "--model_name",

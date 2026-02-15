@@ -92,7 +92,7 @@ Your current run uses `lr = 1e-6` instead of `1e-5`, which:
 1. **Kill current training run**
 2. **Restart with:**
    ```bash
-   python -m environments.gsm8k_rl --launch \
+   python -m environments.gsm8k.gsm8k_rl --launch \
        --max_steps 500 \
        --report_to wandb \
        --run_name "gsm8k_cispo_fixed" \
