@@ -14,7 +14,7 @@ I drew inspiration from two projects I genuinely respect:
 
 Both of them made me think harder about what a good abstraction looks like here.
 
-The design philosophy is intentionally constrained: **this repo is not a framework for writing new algorithms**. It's for *using* the ones that already exist. You bring your environment — the RL task and the SFT setup — and you pick whichever algorithm fits your needs. That's the whole contract.
+The design philosophy is intentionally constrained. This repository is not a framework; it’s a toolkit for applying existing algorithms. You can experiment with different methods and evaluate them within your own environment.
 
 Currently the implementations are in place and working. I'll keep adding algorithms as the field evolves, because honestly, it doesn't look like it's slowing down anytime soon.
 
