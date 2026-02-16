@@ -70,7 +70,7 @@ uv run python -m environments.gsm8k.gsm8k_rl \
     --num_generations 16
 ```
 
-**Hyperparameters:** `--algorithm` (grpo, dr_grpo, dapo, cispo, prime, gspo), `--epsilon_lower`, `--epsilon_upper`, `--beta`, `--loss_reduction` (token, sample), `--use_overlong_penalty`, `--use_dynamic_sampling`.
+**Hyperparameters:** `--algorithm` (grpo, dr_grpo, dapo, cispo, prime, gspo), `--epsilon_lower`, `--epsilon_upper`, `--beta` (for GRPO/Dr. GRPO), `--loss_reduction` (token, sample). Algorithm-specific: `--use_overlong_penalty` and `--use_dynamic_sampling` default to true for DAPO; you can enable them for other algorithms with `--use_overlong_penalty true --use_dynamic_sampling true`. 
 
 **Other config flags:** `--output_dir`, `--model_name`, `--vllm_server_host`, `--vllm_server_port`, `--report_to` (wandb, none), `--eval_steps`, `--eval_num_problems`, `--trainer_gpu_id`, `--use_lora`.
 
