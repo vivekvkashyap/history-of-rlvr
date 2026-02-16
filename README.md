@@ -94,6 +94,10 @@ uv run python scripts/eval_gsm8k.py --model_name outputs/async_rl/checkpoint-500
 
 *Mean reward over training steps on GSM8K.*
 
+## Extra
+
+- [GRADIENT_ANALYSIS.md](GRADIENT_ANALYSIS.md) — Analysis of gradient norms, advantage normalization, and training stability.
+
 ## To-do
 
 - Multi turn chats
