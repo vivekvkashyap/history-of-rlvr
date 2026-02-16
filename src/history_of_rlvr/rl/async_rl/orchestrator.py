@@ -13,8 +13,7 @@ import httpx
 import torch
 from openai import AsyncOpenAI
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-from rl.algorithms.advantages import compute_group_advantages
+from history_of_rlvr.rl.algorithms.advantages import compute_group_advantages
 
 logger = logging.getLogger(__name__)
 

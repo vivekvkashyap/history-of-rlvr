@@ -23,8 +23,8 @@ from transformers import (
     TrainerCallback,
 )
 
-from sft.config import SFTConfig
-from sft.data import SFTDataCollator, SFTDataset
+from history_of_rlvr.sft.config import SFTConfig
+from history_of_rlvr.sft.data import SFTDataCollator, SFTDataset
 
 
 class SFTLoggingCallback(TrainerCallback):

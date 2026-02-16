@@ -28,9 +28,9 @@ from transformers import (
     HfArgumentParser,
 )
 
-from sft.config import SFTConfig
-from sft.data import SFTDataset
-from sft.trainer import SFTTrainer
+from history_of_rlvr.sft.config import SFTConfig
+from history_of_rlvr.sft.data import SFTDataset
+from history_of_rlvr.sft.trainer import SFTTrainer
 
 
 def run_sft(env, cli_args: Optional[List[str]] = None) -> None:
@@ -43,11 +43,6 @@ def run_sft(env, cli_args: Optional[List[str]] = None) -> None:
         cli_args: Optional list of CLI arguments.  If ``None``, uses
                   ``sys.argv[1:]``.
     """
-    # ── Ensure parent directory is on sys.path ────────────────────────
-    root = str(Path(__file__).parent.parent)
-    if root not in sys.path:
-        sys.path.insert(0, root)
-
     # ── Suppress noisy logs ───────────────────────────────────────────
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     for name in ("transformers", "accelerate", "peft", "datasets"):

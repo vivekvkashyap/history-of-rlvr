@@ -12,10 +12,10 @@ Usage:
     python -m environments.gsm8k.gsm8k_sft --model_name Qwen/Qwen2.5-0.5B-Instruct
 """
 
-from sft.config import SFTConfig
-from sft.data import SFTDataCollator, SFTDataset
-from sft.main import run_sft
-from sft.trainer import SFTTrainer
+from history_of_rlvr.sft.config import SFTConfig
+from history_of_rlvr.sft.data import SFTDataCollator, SFTDataset
+from history_of_rlvr.sft.main import run_sft
+from history_of_rlvr.sft.trainer import SFTTrainer
 
 __all__ = [
     "SFTConfig",

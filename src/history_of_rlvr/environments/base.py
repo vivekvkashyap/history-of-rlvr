@@ -104,16 +104,9 @@ def _train(env: Environment, cli_args: List[str]) -> None:
     from rich.console import Console
     from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 
-    root = str(Path(__file__).parent.parent)
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    rl_parent = os.path.join(root, "rl")
-    if rl_parent not in sys.path:
-        sys.path.insert(0, rl_parent)
-
-    from rl.async_rl.config import AsyncGRPOConfig
-    from rl.async_rl.trainer import AsyncGRPOTrainer
-    from rl.sync_rl.log_router import LogRouter
+    from history_of_rlvr.rl.async_rl.config import AsyncGRPOConfig
+    from history_of_rlvr.rl.async_rl.trainer import AsyncGRPOTrainer
+    from history_of_rlvr.rl.sync_rl.log_router import LogRouter
 
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     for name in ("httpx", "openai", "httpcore", "transformers", "accelerate", "peft"):
@@ -296,7 +289,8 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
         forwarded_args = forwarded_args + ["--output_dir", output_dir]
 
     log_dir = os.path.join(output_dir, "logs")
-    cwd = Path(__file__).parent.parent
+    # Project root (parent of src/)
+    cwd = Path(__file__).resolve().parent.parent.parent.parent
 
     os.makedirs(log_dir, exist_ok=True)
     tr_log = os.path.join(log_dir, "trainer.log")
@@ -373,7 +367,7 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
         f.write("clear\n")
         f.write(
             f"CUDA_VISIBLE_DEVICES={vllm_gpu_id} "
-            f"{python} -m rl.async_rl.server "
+            f"{python} -m history_of_rlvr.rl.async_rl.server "
             f"--model {model_name} "
             f"--host {vllm_host} "
             f"--port {vllm_port} "
@@ -388,7 +382,7 @@ def _tmux_launch(env: Environment, forwarded_args: List[str]) -> None:
     _run_cmd(["tmux", "send-keys", "-t", f"{session}:RL.0", f"bash {server_script}", "C-m"])
 
     args_str = " ".join(forwarded_args)
-    env_module = f"environments.{env.name}"
+    env_module = f"history_of_rlvr.environments.{env.name}"
     main_script = os.path.join(script_dir, "main.sh")
     with open(main_script, "w") as f:
         f.write("#!/bin/bash\n")

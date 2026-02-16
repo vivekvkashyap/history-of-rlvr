@@ -24,14 +24,12 @@ from peft import PeftConfig, get_peft_model
 from transformers.trainer import Trainer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-# Parent dir for cross-package imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-from rl.algorithms.grpo.grpo import compute_group_advantages, grpo_loss
+from history_of_rlvr.rl.algorithms.grpo.grpo import compute_group_advantages, grpo_loss
 
-from rl.sync_rl.config import GRPOConfig
-from rl.sync_rl.data import GSM8KDataset
-from rl.sync_rl.reward import compute_rewards_batch
-from rl.sync_rl.inference import VLLMInferenceEngine, InferenceConfig
+from history_of_rlvr.rl.sync_rl.config import GRPOConfig
+from history_of_rlvr.rl.sync_rl.data import GSM8KDataset
+from history_of_rlvr.rl.sync_rl.reward import compute_rewards_batch
+from history_of_rlvr.rl.sync_rl.inference import VLLMInferenceEngine, InferenceConfig
 
 logger = logging.getLogger(__name__)
 

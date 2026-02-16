@@ -103,9 +103,8 @@ def main() -> None:
             vllm_host = forwarded_args[i + 1]
 
     log_dir = os.path.join(output_dir, "logs")
-    # Ensure we're running from history_of_rlvr directory for module imports
-    script_dir = Path(__file__).parent.parent.parent  # Go up to history_of_rlvr
-    cwd = script_dir
+    # Project root (parent of src/)
+    cwd = Path(__file__).resolve().parent.parent.parent.parent
 
     # Create log directory and truncate old log files
     os.makedirs(log_dir, exist_ok=True)
@@ -183,7 +182,7 @@ def main() -> None:
         f.write("clear\n")
         f.write(
             f"CUDA_VISIBLE_DEVICES={vllm_gpu_id} "
-            f"{python} -m rl.async_rl.server "
+            f"{python} -m history_of_rlvr.rl.async_rl.server "
             f"--model {model_name} "
             f"--host {vllm_host} "
             f"--port {vllm_port} "
@@ -210,7 +209,7 @@ def main() -> None:
         )
         f.write('echo "Server is up! Starting training..."\n')
         f.write("sleep 1\n")
-        f.write(f"{env_prefix}{python} -m rl.async_rl.main {args_str}\n")
+        f.write(f"{env_prefix}{python} -m history_of_rlvr.rl.async_rl.main {args_str}\n")
     os.chmod(main_script, 0o755)
     run(["tmux", "send-keys", "-t", f"{session}:RL.1", f"bash {main_script}", "C-m"])
 

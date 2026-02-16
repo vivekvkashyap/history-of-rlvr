@@ -12,7 +12,7 @@ At some point I realised I wanted one place where all of these algorithms lived,
 I drew inspiration from two projects I genuinely respect:
 
 - [`verifiers`](https://github.com/willccbb/verifiers) by [@willccbb](https://x.com/willccbb) — gold standard.
-- [`ludic`](https://github.com/hallerite/ludic) by [@hallerite](https://x.com/hallerite) — which demonstrated how a clean algorithm-swapping interface could work in practice, with a clear separation between agent, environment, and the RL algorithm itself.
+- [`ludic`](https://github.com/hallerite/ludic) by [@hallerite](https://x.com/hallerite) — demonstrated how a clean algorithm-swapping interface could work in practice, with a clear separation between agent, environment, and the RL algorithm itself.
 
 Both of them made me think harder about what a good abstraction looks like here.
 
@@ -24,32 +24,36 @@ Currently the implementations are in place and working. I'll keep adding algorit
 
 ## Algorithms
 
-| Algorithm | Reference | Key Idea |
-|-----------|-----------|----------|
-| **GRPO** | [DeepSeek-Math](https://arxiv.org/abs/2402.03300) | Clipped surrogate + KL penalty, token-level averaging |
-| **Dr. GRPO** | [Understanding R1-Zero](https://arxiv.org/abs/2503.20783) | Unbiased GRPO -- removes length and std normalization biases |
-| **DAPO** | [ByteDance](https://arxiv.org/abs/2503.14476) | Asymmetric clipping, no KL, dynamic sampling, overlong penalty |
-| **CISPO** | [MiniMax-M1](https://arxiv.org/abs/2506.13585) | Clips IS-weight directly with stop-gradient |
-| **Prime** | [Prime Intellect](https://github.com/PrimeIntellect-ai/prime-rl) | Token-level ratio masking with stop-gradient coefficient |
-| **GSPO** | [Qwen3](https://arxiv.org/abs/2507.18071) | Sequence-level importance ratio and clipping |
+| Algorithm | Paper |
+|-----------|-------|
+| **GRPO** | [DeepSeek-Math](https://arxiv.org/abs/2402.03300) |
+| **Dr. GRPO** | [Understanding R1-Zero](https://arxiv.org/abs/2503.20783) |
+| **DAPO** | [ByteDance](https://arxiv.org/abs/2503.14476) |
+| **CISPO** | [MiniMax-M1](https://arxiv.org/abs/2506.13585) |
+| **Prime** | [Prime Intellect](https://github.com/PrimeIntellect-ai/prime-rl) |
+| **GSPO** | [Qwen3](https://arxiv.org/abs/2507.18071) |
 
-
-```python
-def <algo>_loss(trainer_log_probs, inference_log_probs, advantages, completion_mask, ...) -> (loss, stats)
-```
 
 ## Structure
 
 ```
-environments/          # Task definitions (dataset + reward)
-  gsm8k/               #   GSM8K math (RL + SFT)
-  gpqa/                #   GPQA science QA (RL + SFT)
-rl/
-  algorithms/          # Loss functions (grpo, dr_grpo, dapo, cispo, prime, gspo)
-  async_rl/            # Async trainer with vLLM server
-  sync_rl/             # Synchronous trainer
-sft/                   # Supervised fine-tuning trainer
+src/
+  history_of_rlvr/     # Main package
+    environments/      # Task definitions (dataset + reward)
+      gsm8k/           #   GSM8K math (RL + SFT)
+      gpqa/            #   GPQA science QA (RL + SFT)
+    rl/
+      algorithms/      # Loss functions (grpo, dr_grpo, dapo, cispo, prime, gspo)
+      async_rl/        # Async trainer with vLLM server
+      sync_rl/         # Synchronous trainer
+    sft/               # Supervised fine-tuning trainer
 scripts/               # Eval, LoRA merge, serving
+```
+
+## Installation
+
+```bash
+uv sync
 ```
 
 ## Running
@@ -58,7 +62,7 @@ scripts/               # Eval, LoRA merge, serving
 
 ```bash
 # From the history_of_rlvr/ directory
-python environments/gsm8k/gsm8k_rl.py \
+python -m history_of_rlvr.environments.gsm8k.gsm8k_rl \
     --algorithm grpo \
     --model_name Qwen/Qwen2.5-0.5B-Instruct \
     --max_steps 500 \
@@ -70,7 +74,7 @@ Key config flags: `--algorithm` (grpo, dr_grpo, dapo, cispo, prime, gspo), `--ep
 ### SFT
 
 ```bash
-python environments/gsm8k/gsm8k_sft.py \
+python -m history_of_rlvr.environments.gsm8k.gsm8k_sft \
     --model_name Qwen/Qwen2.5-0.5B-Instruct \
     --max_steps 500
 ```
@@ -78,8 +82,14 @@ python environments/gsm8k/gsm8k_sft.py \
 ### Eval
 
 ```bash
-python scripts/eval_gsm8k.py --model_path outputs/async_rl/checkpoint-500
+python scripts/eval_gsm8k.py --model_name outputs/async_rl/checkpoint-500
 ```
+
+### Example run (GSM8K)
+
+![Example run for GSM8K](assets/example_run_gsm8k.png)
+
+*Mean reward over training steps on GSM8K.*
 
 ## To-do
 
@@ -87,9 +97,5 @@ python scripts/eval_gsm8k.py --model_path outputs/async_rl/checkpoint-500
 - Add implementation for SAPO, GMPO.
 - Add implementation for REINFORCE algorithm.
 - Add on-policy like pointwise.
-
-## Requirements
-
-```bash
-pip install -r requirements.txt
-```
+- Tool integration
+- Suitable for code execution

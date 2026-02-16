@@ -14,19 +14,18 @@ from peft import PeftConfig, get_peft_model
 from transformers.trainer import Trainer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-from rl.algorithms.grpo.grpo import grpo_loss
-from rl.algorithms.dr_grpo.dr_grpo import dr_grpo_loss
-from rl.algorithms.cispo.cispo import cispo_loss
-from rl.algorithms.dapo.dapo import dapo_loss
-from rl.algorithms.prime.prime import prime_loss
-from rl.algorithms.gspo.gspo import gspo_loss
+from history_of_rlvr.rl.algorithms.grpo.grpo import grpo_loss
+from history_of_rlvr.rl.algorithms.dr_grpo.dr_grpo import dr_grpo_loss
+from history_of_rlvr.rl.algorithms.cispo.cispo import cispo_loss
+from history_of_rlvr.rl.algorithms.dapo.dapo import dapo_loss
+from history_of_rlvr.rl.algorithms.prime.prime import prime_loss
+from history_of_rlvr.rl.algorithms.gspo.gspo import gspo_loss
 
-from rl.async_rl.config import AsyncGRPOConfig
-from rl.async_rl.client import VLLMClient
-from rl.async_rl.display import print_examples
-from rl.async_rl.evaluator import Evaluator
-from rl.async_rl.orchestrator import Orchestrator, Batch
+from history_of_rlvr.rl.async_rl.config import AsyncGRPOConfig
+from history_of_rlvr.rl.async_rl.client import VLLMClient
+from history_of_rlvr.rl.async_rl.display import print_examples
+from history_of_rlvr.rl.async_rl.evaluator import Evaluator
+from history_of_rlvr.rl.async_rl.orchestrator import Orchestrator, Batch
 
 logger = logging.getLogger(__name__)
 

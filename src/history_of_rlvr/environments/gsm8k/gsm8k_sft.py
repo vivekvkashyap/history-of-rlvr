@@ -5,11 +5,7 @@ from typing import Dict, List
 
 from datasets import load_dataset
 
-_root = str(Path(__file__).parent.parent.parent)
-if _root not in sys.path:
-    sys.path.insert(0, _root)
-
-from environments.base import Environment
+from history_of_rlvr.environments.base import Environment
 
 
 class GSM8K_SFT(Environment):
@@ -64,5 +60,5 @@ class GSM8K_SFT(Environment):
 
 
 if __name__ == "__main__":
-    from sft.main import run_sft
+    from history_of_rlvr.sft.main import run_sft
     run_sft(GSM8K_SFT())

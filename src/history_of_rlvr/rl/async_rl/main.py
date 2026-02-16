@@ -30,12 +30,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 from rich.console import Console
 
-# Parent dir for cross-package imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from async_rl.config import AsyncGRPOConfig
-from async_rl.trainer import AsyncGRPOTrainer
-from sync_rl.log_router import LogRouter
+from history_of_rlvr.rl.async_rl.config import AsyncGRPOConfig
+from history_of_rlvr.rl.async_rl.trainer import AsyncGRPOTrainer
+from history_of_rlvr.rl.sync_rl.log_router import LogRouter
 
 # Suppress noisy logs in the Main pane
 logging.basicConfig(level=logging.WARNING, format="%(message)s")

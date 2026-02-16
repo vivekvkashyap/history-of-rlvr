@@ -21,12 +21,9 @@ import logging
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 
-# Parent dir for cross-package imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from sync_rl.config import GRPOConfig
-from sync_rl.trainer import GRPOTrainer
-from sync_rl.log_router import LogRouter
+from history_of_rlvr.rl.sync_rl.config import GRPOConfig
+from history_of_rlvr.rl.sync_rl.trainer import GRPOTrainer
+from history_of_rlvr.rl.sync_rl.log_router import LogRouter
 
 logging.basicConfig(
     level=logging.INFO,

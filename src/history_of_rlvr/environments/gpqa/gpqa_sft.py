@@ -1,15 +1,9 @@
 import random
-import sys
-from pathlib import Path
 from typing import Dict, List
 
 from datasets import load_dataset
 
-_root = str(Path(__file__).parent.parent.parent)
-if _root not in sys.path:
-    sys.path.insert(0, _root)
-
-from environments.base import Environment
+from history_of_rlvr.environments.base import Environment
 
 
 ANSWER_LETTERS = ["A", "B", "C", "D"]
