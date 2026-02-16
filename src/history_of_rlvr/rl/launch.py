@@ -10,13 +10,13 @@ The launcher starts the vLLM server first and waits for it to become
 healthy before launching the training process.
 
 Usage:
-    python -m rl.async_rl.launch [training args...]
+    python -m history_of_rlvr.rl.launch [training args...]
 
 Example:
-    python -m rl.async_rl.launch --use_lora true --lora_rank 16 --report_to wandb
+    python -m history_of_rlvr.rl.launch --use_lora true --lora_rank 16 --report_to wandb
 
     # Override server GPU and port:
-    python -m rl.async_rl.launch --vllm_server_port 8001
+    python -m history_of_rlvr.rl.launch --vllm_server_port 8001
 
 Tmux controls:
     Ctrl+B  ↑/↓    switch between panes
@@ -82,7 +82,7 @@ def main() -> None:
             "tmux is not installed.  Install with: sudo apt install tmux"
         )
 
-    # All CLI args are forwarded to python -m rl.async_rl.main
+    # All CLI args are forwarded to python -m history_of_rlvr.rl.main
     forwarded_args = sys.argv[1:]
 
     # ── Extract key params from args ───────────────────────────────────
@@ -182,7 +182,7 @@ def main() -> None:
         f.write("clear\n")
         f.write(
             f"CUDA_VISIBLE_DEVICES={vllm_gpu_id} "
-            f"{python} -m history_of_rlvr.rl.async_rl.server "
+            f"{python} -m history_of_rlvr.rl.server "
             f"--model {model_name} "
             f"--host {vllm_host} "
             f"--port {vllm_port} "
@@ -209,7 +209,7 @@ def main() -> None:
         )
         f.write('echo "Server is up! Starting training..."\n')
         f.write("sleep 1\n")
-        f.write(f"{env_prefix}{python} -m history_of_rlvr.rl.async_rl.main {args_str}\n")
+        f.write(f"{env_prefix}{python} -m history_of_rlvr.rl.main {args_str}\n")
     os.chmod(main_script, 0o755)
     run(["tmux", "send-keys", "-t", f"{session}:RL.1", f"bash {main_script}", "C-m"])
 

@@ -3,7 +3,7 @@ from typing import Dict, List
 
 from datasets import load_dataset
 
-from history_of_rlvr.environments.base import Environment
+from environments.base import Environment
 
 
 ANSWER_LETTERS = ["A", "B", "C", "D"]

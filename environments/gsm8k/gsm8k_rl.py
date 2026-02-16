@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from datasets import load_dataset
 from math_verify import verify, parse
 
-from history_of_rlvr.environments.base import Environment, run
+from environments.base import Environment, run
 
 logger = logging.getLogger(__name__)
 _ANSWER_PATTERN = re.compile(r"\\boxed\{([^}]*)\}", re.IGNORECASE)

@@ -21,11 +21,11 @@ from history_of_rlvr.rl.algorithms.dapo.dapo import dapo_loss
 from history_of_rlvr.rl.algorithms.prime.prime import prime_loss
 from history_of_rlvr.rl.algorithms.gspo.gspo import gspo_loss
 
-from history_of_rlvr.rl.async_rl.config import AsyncGRPOConfig
-from history_of_rlvr.rl.async_rl.client import VLLMClient
-from history_of_rlvr.rl.async_rl.display import print_examples
-from history_of_rlvr.rl.async_rl.evaluator import Evaluator
-from history_of_rlvr.rl.async_rl.orchestrator import Orchestrator, Batch
+from history_of_rlvr.rl.config import AsyncGRPOConfig
+from history_of_rlvr.rl.client import VLLMClient
+from history_of_rlvr.rl.display import print_examples
+from history_of_rlvr.rl.evaluator import Evaluator
+from history_of_rlvr.rl.orchestrator import Orchestrator, Batch
 
 logger = logging.getLogger(__name__)
 
@@ -104,21 +104,23 @@ class AsyncGRPOTrainer(Trainer):
         if dataset is not None:
             self.env_dataset = dataset
         else:
-            from rl.sync_rl.data import GSM8KDataset
+            from environments.base import EnvironmentDataset
+            from environments.gsm8k.gsm8k_rl import GSM8K
             logger.info("No dataset provided, falling back to GSM8K...")
-            self.env_dataset = GSM8KDataset(
+            env = GSM8K(
                 split=args.dataset_split,
                 dataset_name=args.dataset_name,
                 dataset_config=args.dataset_config,
             )
+            self.env_dataset = EnvironmentDataset(env.get_dataset())
         logger.info(f"  {len(self.env_dataset)} training examples loaded")
 
         if reward_fn is not None:
             self.reward_fn = reward_fn
         else:
-            from rl.sync_rl.reward import compute_rewards_batch
+            from environments.gsm8k.gsm8k_rl import GSM8K
             logger.info("No reward_fn provided, falling back to GSM8K rewards...")
-            self.reward_fn = compute_rewards_batch
+            self.reward_fn = GSM8K().compute_rewards
 
         host = args.vllm_server_host
         port = args.vllm_server_port

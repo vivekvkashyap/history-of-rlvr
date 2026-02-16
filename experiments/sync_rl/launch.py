@@ -4,13 +4,13 @@ Tmux launcher for GRPO training with split panes.
 Creates a tmux session with three panes:
   - Pane 0 (top):    Inference logs  (tail -F logs/inference.log)
   - Pane 1 (middle): Trainer logs    (tail -F logs/trainer.log)
-  - Pane 2 (bottom): Main process    (python -m sync_rl.main ...)
+  - Pane 2 (bottom): Main process    (python -m experiments.sync_rl.main ...)
 
 Usage:
-    python -m sync_rl.launch [training args...]
+    python -m experiments.sync_rl.launch [training args...]
 
 Example:
-    python -m sync_rl.launch --use_lora true --lora_rank 16 --report_to wandb
+    python -m experiments.sync_rl.launch --use_lora true --lora_rank 16 --report_to wandb
 
 Tmux controls:
     Ctrl+B  ↑/↓    switch between panes
@@ -76,7 +76,7 @@ def main() -> None:
             "tmux is not installed.  Install with: sudo apt install tmux"
         )
 
-    # All CLI args are forwarded to python -m sync_rl.main
+    # All CLI args are forwarded to python -m experiments.sync_rl.main
     forwarded_args = sys.argv[1:]
 
     # Determine output_dir from args (look for --output_dir flag)
@@ -155,7 +155,7 @@ def main() -> None:
     if env_prefix:
         env_prefix += " "
 
-    train_cmd = f"{env_prefix}{python} -m sync_rl.main {args_str}"
+    train_cmd = f"{env_prefix}{python} -m experiments.sync_rl.main {args_str}"
     run(["tmux", "send-keys", "-t", f"{session}:RL.2", train_cmd, "C-m"])
 
     # Focus the Trainer pane by default

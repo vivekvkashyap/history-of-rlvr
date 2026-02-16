@@ -5,7 +5,7 @@ from typing import Dict, List
 
 from datasets import load_dataset
 
-from history_of_rlvr.environments.base import Environment
+from environments.base import Environment
 
 
 class GSM8K_SFT(Environment):

@@ -1,3 +1,17 @@
+Metadata-Version: 2.4
+Name: history-of-rlvr
+Version: 0.1.0
+Summary: RLVR algorithms and training infrastructure
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: torch
+Requires-Dist: transformers
+Requires-Dist: datasets
+Requires-Dist: vllm
+Requires-Dist: accelerate
+Requires-Dist: peft
+Provides-Extra: dev
+
 # History of RLVR
 
 
@@ -39,13 +53,13 @@ Currently the implementations are in place and working. I'll keep adding algorit
 ```
 src/
   history_of_rlvr/     # Main package
+    environments/      # Task definitions (dataset + reward)
+      gsm8k/           #   GSM8K math (RL + SFT)
+      gpqa/            #   GPQA science QA (RL + SFT)
     rl/                # Async trainer with vLLM server
       algorithms/      # Loss functions (grpo, dr_grpo, dapo, cispo, prime, gspo)
       *.py             # trainer, server, client, launch, config, ...
     sft/               # Supervised fine-tuning trainer
-environments/          # Task definitions (dataset + reward)
-  gsm8k/               # GSM8K math (RL + SFT)
-  gpqa/                # GPQA science QA (RL + SFT)
 experiments/           # Alternate training setups
   sync_rl/             # Synchronous trainer (experimental)
 scripts/               # Eval, LoRA merge, serving
@@ -63,7 +77,7 @@ uv sync
 
 ```bash
 # From the history_of_rlvr/ directory
-uv run python -m environments.gsm8k.gsm8k_rl \
+python -m history_of_rlvr.environments.gsm8k.gsm8k_rl \
     --algorithm grpo \
     --model_name Qwen/Qwen2.5-0.5B-Instruct \
     --max_steps 500 \
@@ -77,7 +91,7 @@ uv run python -m environments.gsm8k.gsm8k_rl \
 ### SFT
 
 ```bash
-uv run python -m environments.gsm8k.gsm8k_sft \
+python -m history_of_rlvr.environments.gsm8k.gsm8k_sft \
     --model_name Qwen/Qwen2.5-0.5B-Instruct \
     --max_steps 500
 ```
@@ -85,7 +99,7 @@ uv run python -m environments.gsm8k.gsm8k_sft \
 ### Eval
 
 ```bash
-uv run python scripts/eval_gsm8k.py --model_name outputs/async_rl/checkpoint-500
+python scripts/eval_gsm8k.py --model_name outputs/async_rl/checkpoint-500
 ```
 
 ### Example run (GSM8K)

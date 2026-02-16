@@ -26,10 +26,10 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from history_of_rlvr.rl.algorithms.grpo.grpo import compute_group_advantages, grpo_loss
 
-from history_of_rlvr.rl.sync_rl.config import GRPOConfig
-from history_of_rlvr.rl.sync_rl.data import GSM8KDataset
-from history_of_rlvr.rl.sync_rl.reward import compute_rewards_batch
-from history_of_rlvr.rl.sync_rl.inference import VLLMInferenceEngine, InferenceConfig
+from .config import GRPOConfig
+from .data import GSM8KDataset
+from .reward import compute_rewards_batch
+from .inference import VLLMInferenceEngine, InferenceConfig
 
 logger = logging.getLogger(__name__)
 

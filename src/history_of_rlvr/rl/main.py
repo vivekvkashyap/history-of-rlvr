@@ -13,7 +13,7 @@ GPU layout (typical 2-GPU setup):
     cuda:1 → vLLM server (started separately)
 
 For the full tmux experience, launch via:
-    python -m async_rl.launch [args...]
+    python -m history_of_rlvr.rl.launch [args...]
 instead of calling this script directly.
 
 For environment-based training (recommended), use:
@@ -30,9 +30,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 from rich.console import Console
 
-from history_of_rlvr.rl.async_rl.config import AsyncGRPOConfig
-from history_of_rlvr.rl.async_rl.trainer import AsyncGRPOTrainer
-from history_of_rlvr.rl.sync_rl.log_router import LogRouter
+from history_of_rlvr.rl.config import AsyncGRPOConfig
+from history_of_rlvr.rl.trainer import AsyncGRPOTrainer
+from history_of_rlvr.rl.log_router import LogRouter
 
 # Suppress noisy logs in the Main pane
 logging.basicConfig(level=logging.WARNING, format="%(message)s")

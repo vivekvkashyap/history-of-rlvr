@@ -10,7 +10,7 @@ GPU layout (2-GPU default):
     cuda:1 → vLLM inference engine               (vllm_gpu_id)
 
 For the split-pane tmux experience, launch via:
-    python -m sync_rl.launch [args...]
+    python -m experiments.sync_rl.launch [args...]
 instead of calling this script directly.
 """
 
@@ -21,9 +21,10 @@ import logging
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 
-from history_of_rlvr.rl.sync_rl.config import GRPOConfig
-from history_of_rlvr.rl.sync_rl.trainer import GRPOTrainer
-from history_of_rlvr.rl.sync_rl.log_router import LogRouter
+from history_of_rlvr.rl.log_router import LogRouter
+
+from .config import GRPOConfig
+from .trainer import GRPOTrainer
 
 logging.basicConfig(
     level=logging.INFO,
