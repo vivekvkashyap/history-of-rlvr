@@ -90,7 +90,7 @@ uv run python scripts/eval_gsm8k.py --model_name outputs/async_rl/checkpoint-500
 
 ### Example run (GSM8K)
 
-![Example run for GSM8K](assets/example_run_gsm8k.png)
+<img src="assets/example_run_gsm8k.png" width="500" alt="Example run for GSM8K" />
 
 *Mean reward over training steps on GSM8K.*
 
