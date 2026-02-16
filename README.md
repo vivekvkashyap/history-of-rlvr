@@ -3,8 +3,6 @@
 
 ## Why this repo exists
 
-RL is hard. Anyone who has spent time in this space knows that. I think we should just accept it upfront rather than pretend otherwise.
-
 Over the past year, I found myself going deep on RLVR. It all started with the DeepSeek R1 paper which I think genuinely changed everything for the open-source community, it showed that reasoning behaviour could emerge through RLVR in a way that felt real and reproducible, not just a benchmark trick. After that, I couldn't stop reading. GRPO, DAPO, CISPO, and the wave of papers that followed each one refining the process a little more. Some days it felt like the field was moving faster than I could keep up with.
 
 At some point I realised I wanted one place where all of these algorithms lived, written by me, in a way I actually understood. Not a paper summary, not a borrowed codebase I half-understood — just clean implementations I had worked through myself. That's this repo.
