@@ -38,7 +38,7 @@ Currently the implementations are in place and working. I'll keep adding algorit
 
 ```
 src/
-  history_of_rlvr/     # Main package
+  history_of_rlvr/     # Main package (like src/ludic in ludic repo)
     rl/                # Async trainer with vLLM server
       algorithms/      # Loss functions (grpo, dr_grpo, dapo, cispo, prime, gspo)
       *.py             # trainer, server, client, launch, config, ...
